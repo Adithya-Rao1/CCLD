@@ -1,0 +1,42 @@
+ground_truth:
+  N: 3
+  coupling_strength: 0.6            # must stay in [0,1) -- guarantees theta is Hurwitz-stable (see make_ground_truth)
+  base_decay: 1.0
+  gt_sigma_scale: 1.0
+  gt_seed: null                     # null -> defaults to the run seed, so ground truth varies per seed unless pinned
+
+diffusion:
+  method: "csho"                    # csho | csho_independent | csho_pairwise | ddpm | sdm
+  damping_regime: "critically_damped"  # underdamped | critically_damped | overdamped
+  target_zeta: null
+  alpha: "1.0"
+  beta: "0.5"
+  sigma: 0.3
+  k_reference: 1.0
+  constant_k: false
+  diffusion_mode: "shared"          # shared | independent
+
+model:
+  hidden_dim: 64
+  n_layers: 3
+  time_embed_dim: 16
+
+training:
+  n_diff_steps: 20
+  dt: 0.05
+  batch_size: 256
+  n_train_iters: 2000
+  lr: 1.0e-3
+  seeds: "0,1,2,3,4"
+
+evaluation:
+  n_samples: 4000
+  prior_probe_samples: 512
+  mixing_n_steps: 2000
+  mixing_t_fixed: null              # null -> defaults to n_diff_steps / 2
+
+hardware:
+  device: "cuda"
+
+logging:
+  out_dir: "results/experiment_3_synthetic"
