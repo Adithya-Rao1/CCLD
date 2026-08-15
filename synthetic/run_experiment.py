@@ -150,6 +150,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--n-train-iters", type=int, default=2000)
     p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--grad-clip-norm", type=float, default=1.0)
     p.add_argument("--hidden-dim", type=int, default=64)
     p.add_argument("--n-layers", type=int, default=3)
     p.add_argument("--time-embed-dim", type=int, default=16)
@@ -273,6 +274,14 @@ def train_csho(args, gt: GroundTruthCoupledOU, device) -> Tuple[nn.Module, List[
 
         optimizer.zero_grad()
         loss.backward()
+        # NDSM's loss is only bounded below in expectation, not pointwise (its
+        # cross term z*(s(Y)-s(mu)) is unbounded for any single sample) -- without
+        # clipping, weight/gradient norms grow without bound over training and
+        # sampling quality degrades the more you train (confirmed empirically:
+        # KL divergence went 5.5->257 over 200->8000 iterations, unclipped).
+        # Matches production train_cpu.py's unconditional clip_grad_norm_ with
+        # the same default max_norm=1.0.
+        torch.nn.utils.clip_grad_norm_(score_net.parameters(), max_norm=args.grad_clip_norm)
         optimizer.step()
 
     prior_std = _estimate_prior_std(args, gt, K_self, K_global, coupling, gamma, G, device)
@@ -312,6 +321,7 @@ def train_ddpm(args, gt: GroundTruthCoupledOU, device) -> Tuple[nn.Module, torch
         loss = sum(F.mse_loss(p, n) for p, n in zip(eps_pred, noise))
         optimizer.zero_grad()
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(score_net.parameters(), max_norm=args.grad_clip_norm)
         optimizer.step()
 
     return score_net, ac, betas, alphas
@@ -344,6 +354,7 @@ def train_sdm(args, gt: GroundTruthCoupledOU, device) -> nn.Module:
         loss = sum(F.mse_loss(p, n) for p, n in zip(eps_pred, noise))
         optimizer.zero_grad()
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(score_net.parameters(), max_norm=args.grad_clip_norm)
         optimizer.step()
 
     return score_net
