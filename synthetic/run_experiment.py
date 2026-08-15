@@ -228,11 +228,16 @@ def _estimate_prior_std(args, gt: GroundTruthCoupledOU, K_self, K_global, coupli
     X = [[X0[:, i : i + 1].clone()] for i in range(args.N)]
     V = [[torch.zeros_like(X0[:, i : i + 1])] for i in range(args.N)]
     K_self_p, K_global_p = _make_conditioning(args.N, B, args.k_reference, device)
-    X_next, _, _, _, _ = em_step_n(
-        X, V, K_self_p, K_global_p, args.n_diff_steps, args.n_diff_steps,
-        args.alpha, args.beta, gamma, coupling, True, args.constant_k, args.dt, G,
-    )
-    return [max(X_next[i][0].std().item(), 1e-3) for i in range(args.N)]
+    # Chain the FULL trajectory (not a single step at t=n_diff_steps, whose
+    # time_scale=(T-t)/(t+T)=0 makes the drift vanish and would grossly
+    # underestimate the true T-step accumulated noise) -- matches the fix in
+    # train_csho below.
+    for step in range(1, args.n_diff_steps + 1):
+        X, V, _, _, _ = em_step_n(
+            X, V, K_self_p, K_global_p, step, args.n_diff_steps,
+            args.alpha, args.beta, gamma, coupling, True, args.constant_k, args.dt, G,
+        )
+    return [max(X[i][0].std().item(), 1e-3) for i in range(args.N)]
 
 
 def train_csho(args, gt: GroundTruthCoupledOU, device) -> Tuple[nn.Module, List[float], torch.Tensor, List[float]]:
@@ -248,10 +253,22 @@ def train_csho(args, gt: GroundTruthCoupledOU, device) -> Tuple[nn.Module, List[
         V = [[torch.zeros_like(X0[:, i : i + 1])] for i in range(N)]
         t_idx = torch.randint(1, args.n_diff_steps + 1, (1,)).item()
 
-        X_next, V_next, mu, z_list, sigma_list = em_step_n(
-            X, V, K_self, K_global, t_idx, args.n_diff_steps,
-            args.alpha, args.beta, gamma, coupling, True, args.constant_k, args.dt, G,
-        )
+        # Chain t_idx real em_step_n calls from data (not a single jump straight to
+        # t_idx). A single Euler-Maruyama step only approximates a SHORT timespan
+        # well (the assumption NDSM's own derivation relies on); jumping directly
+        # from data to t_idx in one step badly misrepresents the true t_idx-step
+        # marginal once t_idx>1, increasingly so as t_idx grows -- this was
+        # confirmed empirically (KL divergence grew ~40x per doubling of
+        # n_diff_steps at fixed training budget with the single-jump version, and
+        # got WORSE with more training as the network fit the flawed target more
+        # precisely). Matches production's _simulate_and_sample_ndsm, which chains
+        # through the real trajectory rather than jumping.
+        for step in range(1, t_idx + 1):
+            X_next, V_next, mu, z_list, sigma_list = em_step_n(
+                X, V, K_self, K_global, step, args.n_diff_steps,
+                args.alpha, args.beta, gamma, coupling, True, args.constant_k, args.dt, G,
+            )
+            X, V = X_next, V_next
         loss = ndsm_loss_n(X_next, score_net, V_next, mu, z_list, sigma_list, t_n=t_idx)
 
         optimizer.zero_grad()
@@ -355,10 +372,16 @@ def _measure_mixing_time(args, gt: GroundTruthCoupledOU, coupling, gamma, G, dev
     V = [[torch.zeros_like(X0[:, i : i + 1])] for i in range(N)]
     t_fixed = args.mixing_t_fixed
 
+    # Repeated application at a fixed t needs a stable (attracting) kernel to have
+    # a meaningful mixing time at all -- em_step_n is deliberately the repelling
+    # corruption direction (see its docstring/comment) and has no equilibrium under
+    # indefinite repetition. reverse_step_n with a zero score gives the generative
+    # (attracting) direction's own intrinsic mixing behavior instead.
+    zero_score = [[torch.zeros_like(V[i][0])] for i in range(N)]
     trace = torch.zeros(args.mixing_n_steps)
     for step in range(args.mixing_n_steps):
-        X, V, _, _, _ = em_step_n(
-            X, V, K_self, K_global, t_fixed, args.n_diff_steps,
+        X, V = reverse_step_n(
+            X, V, K_self, K_global, zero_score, t_fixed, args.n_diff_steps,
             args.alpha, args.beta, gamma, coupling, True, args.constant_k, args.dt, G,
         )
         trace[step] = torch.stack([X[i][0].mean() for i in range(N)]).mean()

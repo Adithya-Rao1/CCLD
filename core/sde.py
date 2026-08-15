@@ -74,7 +74,14 @@ def em_step_n(
         coupling_matrix=coupling_matrix_drift, use_gamma=use_gamma, constant_k=constant_k,
     )
 
-    mu = [[v + dv * dt for v, dv in zip(V[i], dV[i])] for i in range(N)]
+    # Minus sign is required, not a style choice: drift_fn_n is an attracting restoring
+    # force, so the forward/noising process must run it in reverse (push away from
+    # equilibrium) to actually corrupt data into noise. reverse_step_n runs the same
+    # drift forward (+dv, see below) to pull noise back toward data. Matches production
+    # loss_fn.py::em_mean_multi_state's `v - dv*dt` (reverse_sampler.py's reverse_step
+    # uses `+dv`) -- do not "unify" these signs, that reintroduces a confirmed bug
+    # (see plan file i-m-trying-to-finish-synthetic-tiger.md, 2026-08-15 entry).
+    mu = [[v - dv * dt for v, dv in zip(V[i], dV[i])] for i in range(N)]
 
     primary_shape = mu[0][primary_index].shape
     device, dtype = mu[0][primary_index].device, mu[0][primary_index].dtype

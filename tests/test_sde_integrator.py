@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 
 from core.coupling import build_coupling_matrix
+from core.drift import drift_fn_n
 from core.sde import build_g_matrix_n, em_step_n, ndsm_loss_n, reverse_step_n
 
 
@@ -117,10 +118,60 @@ def test_ndsm_loss_n_runs_and_scalar():
     assert torch.isfinite(loss)
 
 
+def test_em_step_n_forward_drift_sign_matches_production():
+    """Regression test for the 2026-08-15 em_step_n sign bug: em_step_n used `mu =
+    v + dv*dt` instead of the required `mu = v - dv*dt`. drift_fn_n is an attracting
+    restoring force; the forward/noising process must run it in reverse (push away
+    from equilibrium) to actually corrupt data into noise -- reverse_step_n runs the
+    same drift forward (+dv) to pull noise back toward data, and already matched this
+    convention. Confirmed against the production reference this repo generalizes from
+    (Metis_V1/src/diffusion/loss_fn.py::em_mean_multi_state's `v - dv*dt`, vs.
+    reverse_sampler.py::reverse_step's `v + dv*dt`) and against the NDSM paper's own
+    forward-step definition (eq. 6: mu = yn - f(yn,T-tn)*dtn).
+
+    This bug passed every shape/finiteness check and even every KL/sample-quality
+    check under `--quick`'s tiny n_diff_steps=5 (the corruption barely needed to
+    diverge from near-equilibrium at that scale) -- it only produces a dramatic
+    quality regression at real (n_diff_steps~20+) settings, so a purely statistical
+    round-trip probe on a single toy state is unreliable at this dt/T scale (both
+    sign conventions show O(1) mean bias in that setup, likely due to the NDSM
+    paper's own noted small-dt discretization bias in the raw conditional score,
+    which is exactly why their training loss adds a specific bias-correcting term
+    rather than relying on the raw discrete score directly). This test instead pins
+    the sign deterministically -- no statistics, no flakiness -- by checking the mean
+    a single em_step_n call actually returns against the drift's known sign, for a
+    state where the drift is unambiguously nonzero.
+    """
+    N = 2
+    shape = (2, 3)
+    g = torch.Generator().manual_seed(11)
+    X = [[torch.randn(shape, generator=g) + 2.0] for _ in range(N)]  # away from equilibrium (0)
+    V = [[torch.randn(shape, generator=g)] for _ in range(N)]
+    K_self = [[torch.rand(shape, generator=g) + 0.5] for _ in range(N)]
+    K_global = [torch.rand(shape, generator=g) + 0.5 for _ in range(N)]
+    alpha, beta, gamma = [1.0] * N, [0.5] * N, [1.0] * N
+    coupling = build_coupling_matrix(N, mode="mean_field")
+    G = build_g_matrix_n(torch.tensor(0.1), N, diffusion_mode="shared")
+    t, T, dt = torch.tensor(5.0), 10, 0.02
+
+    dV = drift_fn_n(X, V, K_self, K_global, t, T, alpha, beta, gamma,
+                     coupling_matrix=coupling, use_gamma=True, constant_k=False)
+    X_next, V_next, mu, z_list, sigma_list = em_step_n(
+        X, V, K_self, K_global, t, T, alpha, beta, gamma, coupling, True, False, dt, G,
+    )
+    for i in range(N):
+        expected_mu = V[i][0] - dV[i][0] * dt
+        assert torch.allclose(mu[i][0], expected_mu, atol=1e-6), (
+            f"population {i}: em_step_n's mean is {mu[i][0]}, expected V - dV*dt = "
+            f"{expected_mu} (i.e. the forward step must subtract the drift, not add it)"
+        )
+
+
 if __name__ == "__main__":
     test_em_step_n_shapes_and_finite()
     test_em_step_n_independent_diffusion_mode()
     test_reverse_step_n_shapes_and_finite()
     test_em_step_n_determinism_with_seeded_generator()
     test_ndsm_loss_n_runs_and_scalar()
+    test_em_step_n_forward_drift_sign_matches_production()
     print("OK: em_step_n / reverse_step_n / ndsm_loss_n pass shape, finiteness, and determinism checks.")
