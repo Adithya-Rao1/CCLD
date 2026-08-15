@@ -1,0 +1,9 @@
+.claude/
+CLAUDE.md
+*.pt
+*.log
+__pycache__/
+*.pyc
+results/
+.DS_Store
+.staging/
