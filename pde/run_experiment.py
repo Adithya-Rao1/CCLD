@@ -1,0 +1,391 @@
+from __future__ import annotations
+
+import argparse
+import math
+import os
+from typing import Dict, List, Optional
+
+import torch
+import torch.nn.functional as F
+import yaml
+from torch.utils.data import DataLoader
+
+from core.baselines import (
+    ddpm_forward_n, ddpm_reverse_step_n, make_ddpm_schedule, vp_beta_t, vp_sde_drift_n, vp_sde_reverse_step_n,
+)
+from core.coupling import build_coupling_matrix
+from core.damping import calibrate_gammas_for_regime
+from core.diagnostics_bridge import attach_grad_hooks_generic, grad_norm_buckets, make_drift_detector
+from core.reporting import plot_bar_comparison, render_experiment_report, write_csv, write_json
+from core.sde import build_g_matrix_n, em_step_n, ndsm_loss_n, reverse_step_n
+from core.stats import aggregate_over_seeds
+from pde.dataset import ALL_PROBLEMS, MultiPhysicsFieldDataset, collate_fn
+from pde.model import (
+    FlatScoreNetwork, MultiPhysicsScoreNetwork, PhysicsModel, make_flat_score_fn, make_score_fn,
+)
+
+METHOD_CONFIGS = {
+    "csho": {"coupling_mode": "mean_field", "diffusion_mode": "shared"},
+    "csho_independent": {"coupling_mode": "independent", "diffusion_mode": "shared"},
+    "csho_shared_g": {"coupling_mode": "mean_field", "diffusion_mode": "shared"},
+    "csho_independent_g": {"coupling_mode": "mean_field", "diffusion_mode": "independent"},
+    "csho_pairwise": {"coupling_mode": "pairwise", "diffusion_mode": "shared"},
+}
+BASELINE_METHODS = {"ddpm", "sdm"}
+ALL_METHODS = sorted(set(METHOD_CONFIGS) | BASELINE_METHODS)
+
+
+def parse_float_list(s, n: int) -> List[float]:
+    vals = [float(v) for v in s] if isinstance(s, (list, tuple)) else [float(v) for v in str(s).split(",") if v.strip()]
+    if len(vals) == 1:
+        return vals * n
+    if len(vals) != n:
+        raise ValueError(f"Expected 1 or {n} float values, got {len(vals)}")
+    return vals
+
+
+def load_config_defaults(config_path: str) -> Dict:
+    with open(config_path) as f:
+        cfg = yaml.safe_load(f) or {}
+    flat = {}
+    for section in cfg.values():
+        if isinstance(section, dict):
+            flat.update(section)
+    return flat
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="Experiment 2 (physics): does CSHO cross-field coupling help multi-physics coupled-PDE prediction?")
+    p.add_argument("--config", default=None)
+    p.add_argument("--data-root", default=None)
+    p.add_argument("--problem", default="TE_heat", choices=ALL_PROBLEMS)
+    p.add_argument("--split", default="training")
+    p.add_argument("--val-split", default="testing")
+    p.add_argument("--n-tasks", type=int, default=None)
+    p.add_argument("--task-subset", default=None, help="comma-separated explicit task-name override")
+    p.add_argument("--method", default="csho", choices=ALL_METHODS)
+    p.add_argument("--damping-regime", default="critically_damped",
+                    choices=["underdamped", "critically_damped", "overdamped"])
+    p.add_argument("--target-zeta", type=float, default=None)
+    p.add_argument("--alpha", default="1.0")
+    p.add_argument("--beta", default="0.5")
+    p.add_argument("--sigma", type=float, default=0.1)
+    p.add_argument("--k-reference", type=float, default=1.0)
+    p.add_argument("--constant-k", action="store_true")
+    p.add_argument("--n-diff-steps", type=int, default=2)
+    p.add_argument("--dt", type=float, default=0.5)
+    p.add_argument("--batch-size", type=int, default=8)
+    p.add_argument("--n-epochs", type=int, default=5)
+    p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--seeds", default="0,1,2,3,4")
+    p.add_argument("--image-size", type=int, default=128)
+    p.add_argument("--latent-dim", type=int, default=64)
+    p.add_argument("--backbone-channels", type=int, default=128)
+    p.add_argument("--base-channels", type=int, default=32)
+    p.add_argument("--n-downsample", type=int, default=3)
+    p.add_argument("--score-blocks", type=int, default=3)
+    p.add_argument("--score-heads", type=int, default=4)
+    p.add_argument("--lambda-ndsm", type=float, default=1.0)
+    p.add_argument("--explode-threshold", type=float, default=1e3)
+    p.add_argument("--max-hook-modules", type=int, default=200)
+    p.add_argument("--max-samples", type=int, default=None)
+    p.add_argument("--num-workers", type=int, default=2)
+    p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--out-dir", default="results/experiment_2_physics")
+    return p
+
+
+def parse_args(argv=None) -> argparse.Namespace:
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--config", default=None)
+    pre_args, _ = pre.parse_known_args(argv)
+
+    parser = build_arg_parser()
+    if pre_args.config:
+        parser.set_defaults(**load_config_defaults(pre_args.config))
+    args = parser.parse_args(argv)
+
+    if args.data_root is None:
+        raise ValueError("--data-root is required (directly, or via data.data_root in --config)")
+
+    args.seeds = [int(s) for s in str(args.seeds).split(",") if s.strip() != ""]
+    args.task_subset = [t.strip() for t in args.task_subset.split(",")] if args.task_subset else None
+    return args
+
+
+def build_method_state(args, N: int, device):
+    if args.method in METHOD_CONFIGS:
+        cfg = METHOD_CONFIGS[args.method]
+        coupling = build_coupling_matrix(N, mode=cfg["coupling_mode"], device=device)
+        g_per_task = None
+        if cfg["diffusion_mode"] == "independent":
+            g_per_task = [args.sigma * (0.8 + 0.4 * i / max(N - 1, 1)) for i in range(N)]
+        return {"is_csho": True, "cfg": cfg, "coupling": coupling, "g_per_task": g_per_task, "ddpm_sched": None}
+    if args.method == "ddpm":
+        return {"is_csho": False, "cfg": None, "coupling": None, "g_per_task": None,
+                "ddpm_sched": make_ddpm_schedule(args.n_diff_steps, device=device)}
+    if args.method == "sdm":
+        return {"is_csho": False, "cfg": None, "coupling": None, "g_per_task": None, "ddpm_sched": None}
+    raise ValueError(f"Unknown method {args.method!r}")
+
+
+def relative_l2_error(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> float:
+    num = torch.linalg.norm((pred - target).flatten(1), dim=-1)
+    den = torch.linalg.norm(target.flatten(1), dim=-1).clamp_min(eps)
+    return (num / den).mean().item()
+
+
+def spectral_l2_error(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> float:
+    pred_fft = torch.fft.fft2(pred.float()).abs()
+    target_fft = torch.fft.fft2(target.float()).abs()
+    num = torch.linalg.norm((pred_fft - target_fft).flatten(1), dim=-1)
+    den = torch.linalg.norm(target_fft.flatten(1), dim=-1).clamp_min(eps)
+    return (num / den).mean().item()
+
+
+def vp_forward_step_with_noise(X: List[torch.Tensor], beta_t: torch.Tensor, dt: float):
+    drift = vp_sde_drift_n(X, beta_t)
+    g = torch.sqrt(beta_t)
+    noise = [torch.randn_like(x) for x in X]
+    X_next = [x + d * dt + g * math.sqrt(dt) * n for x, d, n in zip(X, drift, noise)]
+    return X_next, noise
+
+
+def make_dataset(args, split: str) -> MultiPhysicsFieldDataset:
+    return MultiPhysicsFieldDataset(
+        args.data_root, args.problem, split=split, n_tasks=args.n_tasks, task_subset=args.task_subset,
+        image_size=(args.image_size, args.image_size), max_samples=args.max_samples,
+    )
+
+
+def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
+    torch.manual_seed(seed)
+    device = torch.device(args.device)
+
+    train_ds = make_dataset(args, args.split)
+    try:
+        val_ds = make_dataset(args, args.val_split)
+    except (FileNotFoundError, ValueError):
+        val_ds = train_ds
+
+    task_names = train_ds.task_names
+    N = len(task_names)
+    args.alpha_list = parse_float_list(args.alpha, N)
+    args.beta_list = parse_float_list(args.beta, N)
+
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
+                               num_workers=args.num_workers, collate_fn=collate_fn, drop_last=True)
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
+                             num_workers=args.num_workers, collate_fn=collate_fn)
+
+    cond_in_ch = train_ds[0]["conditioning"].shape[0]
+    model = PhysicsModel(task_names, cond_in_ch=cond_in_ch, out_hw=(args.image_size, args.image_size),
+                          latent_dim=args.latent_dim, backbone_ch=args.backbone_channels,
+                          base_ch=args.base_channels, n_downsample=args.n_downsample).to(device)
+
+    state = build_method_state(args, N, device)
+    is_csho = state["is_csho"]
+    if is_csho:
+        score_net = MultiPhysicsScoreNetwork(N, args.latent_dim, model.backbone.out_ch,
+                                              n_blocks=args.score_blocks, n_heads=args.score_heads).to(device)
+    else:
+        score_net = FlatScoreNetwork(N, args.latent_dim, model.backbone.out_ch,
+                                      n_blocks=args.score_blocks, n_heads=args.score_heads).to(device)
+
+    optimizer = torch.optim.Adam(list(model.parameters()) + list(score_net.parameters()), lr=args.lr)
+
+    gamma = calibrate_gammas_for_regime(args.alpha_list, [args.k_reference] * N, args.damping_regime, args.target_zeta)
+    drift_detector = make_drift_detector(bucket_names=[])
+    attach_grad_hooks_generic(model, max_modules=args.max_hook_modules)
+    attach_grad_hooks_generic(score_net, max_modules=args.max_hook_modules)
+
+    nan_events, explosion_events, n_steps = 0, 0, 0
+
+    model.train()
+    score_net.train()
+    for _epoch in range(args.n_epochs):
+        for batch in train_loader:
+            conditioning = batch["conditioning"].to(device)
+            targets = [t.to(device) for t in batch["tasks"]]
+            X, K_self, K_global, feat, y0 = model.encode(conditioning)
+
+            init_loss = torch.zeros((), device=device)
+            for name, y0_t, target in zip(task_names, [y0[n] for n in task_names], targets):
+                init_loss = init_loss + F.l1_loss(y0_t, target)
+
+            t_idx = torch.randint(1, args.n_diff_steps + 1, (1,)).item()
+
+            if is_csho:
+                cfg, coupling, g_per_task = state["cfg"], state["coupling"], state["g_per_task"]
+                V = [[torch.zeros_like(x[0])] for x in X]
+                G = build_g_matrix_n(torch.tensor(args.sigma, device=device), N, diffusion_mode=cfg["diffusion_mode"],
+                                      g_per_task=g_per_task, coupling_matrix=coupling if cfg["diffusion_mode"] == "independent" else None)
+                X_next, V_next, mu, z_list, sigma_list = em_step_n(
+                    X, V, K_self, K_global, t_idx, args.n_diff_steps, alpha=args.alpha_list, beta=args.beta_list, gamma=gamma,
+                    coupling_matrix_drift=coupling, use_gamma=True, constant_k=args.constant_k, dt=args.dt, G=G,
+                )
+                score_fn = make_score_fn(score_net, feat)
+                ndsm = ndsm_loss_n(X, score_fn, V_next, mu, z_list, sigma_list, t_n=t_idx)
+
+                readout_loss = torch.zeros((), device=device)
+                for name, x, target in zip(task_names, X, targets):
+                    pred = model.decode(name, x[0])
+                    readout_loss = readout_loss + F.l1_loss(pred, target)
+
+                loss = init_loss + readout_loss + args.lambda_ndsm * ndsm
+            else:
+                X0_flat = [x[0] for x in X]
+                flat_fn = make_flat_score_fn(score_net, feat)
+                if args.method == "ddpm":
+                    ac, _, _ = state["ddpm_sched"]
+                    Xt, noise = ddpm_forward_n(X0_flat, torch.tensor(t_idx, device=device), ac)
+                    eps_pred = flat_fn(Xt, t_idx)
+                else:
+                    beta_t = vp_beta_t(torch.tensor(t_idx / args.n_diff_steps, device=device), 1.0)
+                    Xt, noise = vp_forward_step_with_noise(X0_flat, beta_t, 1.0 / args.n_diff_steps)
+                    eps_pred = flat_fn(Xt, t_idx / args.n_diff_steps)
+                diffusion_loss = sum(F.mse_loss(p, n) for p, n in zip(eps_pred, noise))
+
+                readout_loss = torch.zeros((), device=device)
+                for name, x, target in zip(task_names, X, targets):
+                    pred = model.decode(name, x[0])
+                    readout_loss = readout_loss + F.l1_loss(pred, target)
+
+                loss = init_loss + readout_loss + args.lambda_ndsm * diffusion_loss
+
+            optimizer.zero_grad()
+            loss.backward()
+            buckets = {}
+            for prefix, mod in (("model", model), ("score_net", score_net)):
+                for k, v in grad_norm_buckets(mod).items():
+                    buckets[f"{prefix}.{k}"] = v
+            triggered, _ = drift_detector.update_and_check(buckets, args.explode_threshold)
+            if triggered:
+                explosion_events += 1
+            if torch.isfinite(loss):
+                optimizer.step()
+            else:
+                nan_events += 1
+            n_steps += 1
+
+    metrics = evaluate(args, model, score_net, val_loader, device, task_names, state, gamma)
+    metrics["nan_events"] = float(nan_events)
+    metrics["explosion_events"] = float(explosion_events)
+    metrics["n_train_steps"] = float(n_steps)
+    return metrics
+
+
+@torch.no_grad()
+def evaluate(args, model, score_net, val_loader, device, task_names, state, gamma) -> Dict[str, float]:
+    model.eval()
+    score_net.eval()
+    is_csho = state["is_csho"]
+    N = len(task_names)
+    is_elder = args.problem == "Elder"
+    sums: Dict[str, float] = {}
+    counts: Dict[str, int] = {}
+    rollout_errs: List[List[float]] = []
+
+    for batch in val_loader:
+        conditioning = batch["conditioning"].to(device)
+        targets = [t.to(device) for t in batch["tasks"]]
+        X, K_self, K_global, feat, _ = model.encode(conditioning)
+
+        if is_csho:
+            cfg, coupling, g_per_task = state["cfg"], state["coupling"], state["g_per_task"]
+            V = [[torch.zeros_like(x[0])] for x in X]
+            X_cur, V_cur = X, V
+            G = build_g_matrix_n(torch.tensor(args.sigma, device=device), N, diffusion_mode=cfg["diffusion_mode"],
+                                  g_per_task=g_per_task, coupling_matrix=coupling if cfg["diffusion_mode"] == "independent" else None)
+            score_fn = make_score_fn(score_net, feat)
+            for t_idx in reversed(range(1, args.n_diff_steps + 1)):
+                score_outputs = score_fn(X_cur, V_cur, t_idx)
+                X_cur, V_cur = reverse_step_n(
+                    X_cur, V_cur, K_self, K_global, score_outputs, t_idx, args.n_diff_steps,
+                    alpha=args.alpha_list, beta=args.beta_list, gamma=gamma,
+                    coupling_matrix_drift=coupling, use_gamma=True, constant_k=args.constant_k, dt=args.dt, G=G,
+                )
+            final_latents = [X_cur[i][0] for i in range(N)]
+        elif args.method == "ddpm":
+            ac, betas_s, alphas_s = state["ddpm_sched"]
+            T_eff = max(args.n_diff_steps - 1, 1)
+            X0_flat = [x[0] for x in X]
+            X_flat, _ = ddpm_forward_n(X0_flat, torch.tensor(T_eff, device=device), ac)
+            flat_fn = make_flat_score_fn(score_net, feat)
+            for t_idx in reversed(range(1, T_eff)):
+                eps_pred = flat_fn(X_flat, t_idx)
+                X_flat = ddpm_reverse_step_n(X_flat, eps_pred, t_idx, betas_s, alphas_s, ac)
+            eps_pred = flat_fn(X_flat, 1)
+            ac1 = ac[1]
+            final_latents = [(x - torch.sqrt(1 - ac1) * e) / torch.sqrt(ac1) for x, e in zip(X_flat, eps_pred)]
+        else:
+            X_flat = [x[0] for x in X]
+            flat_fn = make_flat_score_fn(score_net, feat)
+            dt_step = 1.0 / args.n_diff_steps
+            for t_idx in reversed(range(1, args.n_diff_steps + 1)):
+                t_cont = t_idx / args.n_diff_steps
+                beta_t = vp_beta_t(torch.tensor(t_cont, device=device), 1.0)
+                eps_pred = flat_fn(X_flat, t_cont)
+                g_t = torch.sqrt(beta_t)
+                score = [-e / (g_t * math.sqrt(dt_step) + 1e-8) for e in eps_pred]
+                X_flat = vp_sde_reverse_step_n(X_flat, score, beta_t, dt_step)
+            final_latents = X_flat
+
+        preds = [model.decode(name, final_latents[i]) for i, name in enumerate(task_names)]
+
+        for name, pred, target in zip(task_names, preds, targets):
+            rel = relative_l2_error(pred, target)
+            spec = spectral_l2_error(pred, target)
+            for k, v in ((f"{name}_rel_l2", rel), (f"{name}_spectral_l2", spec)):
+                sums[k] = sums.get(k, 0.0) + v
+                counts[k] = counts.get(k, 0) + 1
+
+        if is_elder:
+            n_t, n_f = 10, 3
+            per_step = []
+            for step in range(n_t):
+                errs = [relative_l2_error(preds[step * n_f + f], targets[step * n_f + f]) for f in range(n_f)]
+                per_step.append(sum(errs) / n_f)
+            rollout_errs.append(per_step)
+
+    metrics = {k: sums[k] / counts[k] for k in sums}
+    if rollout_errs:
+        for step in range(len(rollout_errs[0])):
+            metrics[f"elder_rollout_step{step + 1}_rel_l2"] = sum(r[step] for r in rollout_errs) / len(rollout_errs)
+    return metrics
+
+
+def main():
+    args = parse_args()
+    os.makedirs(args.out_dir, exist_ok=True)
+
+    per_seed_results: Dict[int, Dict[str, float]] = {}
+    for seed in args.seeds:
+        print(f"[{args.method}] seed={seed} starting")
+        per_seed_results[seed] = train_one_seed(args, seed)
+        print(f"[{args.method}] seed={seed} done: {per_seed_results[seed]}")
+
+    summary = aggregate_over_seeds(per_seed_results)
+    summary_rows = [{"metric": k, **v} for k, v in summary.items()]
+    write_csv(summary_rows, os.path.join(args.out_dir, f"{args.method}_summary.csv"))
+    write_json(
+        {"args": vars(args), "per_seed": per_seed_results, "summary": summary},
+        os.path.join(args.out_dir, f"{args.method}_results.json"),
+    )
+
+    labels = list(summary.keys())
+    fig_path = plot_bar_comparison(
+        labels, [summary[k]["mean"] for k in labels], [summary[k]["std"] for k in labels],
+        title=f"{args.method} -- metric summary", ylabel="value",
+        out_path=os.path.join(args.out_dir, f"{args.method}_summary.png"),
+    )
+    render_experiment_report(
+        experiment_name=f"Experiment 2 (physics) -- {args.method}",
+        summary_rows=summary_rows, significance_rows=[], figure_paths=[fig_path],
+        out_path=os.path.join(args.out_dir, f"{args.method}_report.md"),
+    )
+    print(f"Done. Results written to {args.out_dir}")
+
+
+if __name__ == "__main__":
+    main()
