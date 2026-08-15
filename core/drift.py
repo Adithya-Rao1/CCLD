@@ -21,6 +21,27 @@ def _mean_frob_norm(tensors: List[torch.Tensor]) -> torch.Tensor:
     return torch.stack(norms).mean()
 
 
+def _mean_per_sample(tensors: List[torch.Tensor]) -> torch.Tensor:
+    """Per-batch-element mean: reduces every tensor over all dims except dim 0 (the
+    shared batch dimension), then averages across the population's tensor list.
+
+    This is what makes the coupling term below capable of inducing genuine
+    per-sample statistical dependence between populations, rather than only
+    nudging each population's batch-aggregate mean toward the others' -- a
+    population's tensors can have arbitrarily different non-batch shapes (e.g.
+    different atom/node counts between populations) with no alignment or padding
+    needed, since only dim 0 (batch) has to match across populations, and it always
+    does by construction (every population's tensors come from the same batch).
+    """
+    means = [t.float().reshape(t.shape[0], -1).mean(dim=1) for t in tensors]
+    return torch.stack(means, dim=0).mean(dim=0)
+
+
+def _broadcast_per_sample(v: torch.Tensor, like: torch.Tensor) -> torch.Tensor:
+    """Reshape a (B,)-shaped per-sample value to broadcast against `like`'s full shape."""
+    return v.view(v.shape[0], *([1] * (like.ndim - 1)))
+
+
 def drift_fn_n(
     X: List[List[torch.Tensor]],
     V: List[List[torch.Tensor]],
@@ -55,18 +76,19 @@ def drift_fn_n(
         norm_f_k_global = torch.as_tensor(1.0, device=X[0][0].device)
 
     omega_sq = [-(norm_f_k_self[i] + norm_f_k_global) for i in range(N)]
-    m = [torch.stack([x.float().mean() for x in X[i]]).mean() for i in range(N)]
+    m = [_mean_per_sample(X[i]) for i in range(N)]  # each m[i] has shape (B,)
 
     target = [
         sum(coupling_matrix[i, j] * m[j] for j in range(N) if j != i)
         for i in range(N)
-    ]
+    ]  # each target[i] has shape (B,)
 
     dV: List[List[torch.Tensor]] = []
     for i in range(N):
         dv_i = []
         for x, v in zip(X[i], V[i]):
-            core = alpha[i] * omega_sq[i] * x + beta[i] * norm_f_k_global * (target[i] - x)
+            target_i = _broadcast_per_sample(target[i], x)
+            core = alpha[i] * omega_sq[i] * x + beta[i] * norm_f_k_global * (target_i - x)
             if use_gamma:
                 core = -gamma[i] * v + core
             dv_i.append(time_scale * core)
