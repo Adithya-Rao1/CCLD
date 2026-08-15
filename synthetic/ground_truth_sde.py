@@ -17,8 +17,8 @@ class GroundTruthCoupledOU:
         self.N = theta.shape[0]
 
     def stationary_covariance(self) -> torch.Tensor:
-        A = (-self.theta).double().numpy()
-        Q = (-(self.sigma_gt @ self.sigma_gt.T)).double().numpy()
+        A = (-self.theta).double().cpu().numpy()
+        Q = (-(self.sigma_gt @ self.sigma_gt.T)).double().cpu().numpy()
         cov = solve_continuous_lyapunov(A, Q)
         cov = torch.as_tensor((cov + cov.T) / 2, dtype=self.theta.dtype)
         return cov
