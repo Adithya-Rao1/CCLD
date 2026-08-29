@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "coupledsho"
+version = "0.1.0"
+description = "Validation suite for an N-way generalization of a hypoelliptic, critically-damped-Langevin (coupled-SHO) diffusion drift"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Adithya Rao" }]
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0",
+    "torchvision>=0.15",
+    "numpy>=1.24,<3",
+    "scipy>=1.10",
+    "pyyaml>=6.0",
+    "matplotlib>=3.7",
+    "pillow>=9.0",
+    "pyarrow>=12.0",
+    "h5py>=3.8",
+    "huggingface_hub>=0.20",
+    "requests>=2.28",
+]
+
+[project.urls]
+Repository = "https://github.com/adithyarao/CoupledSHO"
+
+[tool.setuptools.packages.find]
+include = ["core", "core.*", "synthetic", "synthetic.*", "pde", "pde.*", "image", "image.*"]

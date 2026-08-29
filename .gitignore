@@ -1,9 +1,12 @@
 .claude/
 CLAUDE.md
+RESULTS.md
 *.pt
 *.log
 __pycache__/
 *.pyc
+*.egg-info/
+build/
 results/
 .DS_Store
 .staging/
