@@ -74,6 +74,11 @@ whatever default build PyPI gives it.
 `requirements.txt` is kept as an alternative if you'd rather not install the package itself:
 `pip install -r requirements.txt`.
 
+Both pin `numpy<2`: torchvision/pyarrow/h5py wheels are commonly built against the NumPy 1.x ABI,
+and NumPy 2.x can fail at import with `A module that was compiled using NumPy 1.x cannot be run in
+NumPy 2.x`. If you already have NumPy 2.x installed in the target environment, downgrade it
+(`pip install "numpy<2"`) rather than overriding this pin.
+
 ## Quickstart: synthetic experiments
 
 `synthetic/` is the only experiment that's runnable end-to-end right now -- closed-form Gaussian
