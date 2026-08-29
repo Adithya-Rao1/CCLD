@@ -10,7 +10,7 @@ import torch
 from core.coupling import build_coupling_matrix
 from core.reporting import write_csv, write_json
 from core.sde import build_g_matrix_n
-from core.stats import aggregate_over_seeds
+from core.stats import aggregate_over_seeds, compare_configs
 from synthetic.anderson_sde import anderson_em_step_coupled_gamma, anderson_reverse_step_coupled_gamma
 from synthetic.drift_coupled_gamma import calibrate_coupled_gammas
 from synthetic.exact_dsm import precompute_transition_params, sample_and_tikhonov_score_target
@@ -130,18 +130,29 @@ def run():
     os.makedirs(OUT_DIR, exist_ok=True)
     summary_rows = []
     all_rows = []
+    per_seed_rows = []
+    sig_rows = []
 
     for N in N_SWEEP:
         with open(f"{BASELINE_DIR}/N{N}_ddpm/ddpm_results.json") as f:
-            ddpm = json.load(f)["summary"]
+            ddpm_full = json.load(f)
         with open(f"{BASELINE_DIR}/N{N}_sdm/sdm_results.json") as f:
-            sdm = json.load(f)["summary"]
+            sdm_full = json.load(f)
+        ddpm = ddpm_full["summary"]
+        sdm = sdm_full["summary"]
+        ddpm_per_seed = {int(s): m for s, m in ddpm_full["per_seed"].items()}
+        sdm_per_seed = {int(s): m for s, m in sdm_full["per_seed"].items()}
 
-        print(f"\n=== N={N} (sigma={SIGMA_BY_N[N]}, lam={LAM}, beta={BETA}) ===")
+        for method_name, baseline_per_seed in [("ddpm", ddpm_per_seed), ("sdm", sdm_per_seed)]:
+            for seed, m in baseline_per_seed.items():
+                per_seed_rows.append({"N": N, "method": method_name, "seed": seed, **m})
+
+        print(f"\n=== N={N} (sigma={SIGMA_BY_N[N]}, lam={LAM}, beta={BETA}, n_diff_steps={N_DIFF_STEPS}, dt={DT}) ===")
         per_seed = {}
         for seed in SEEDS:
             m = train_one_seed(N, seed)
             per_seed[seed] = m
+            per_seed_rows.append({"N": N, "method": "csho_tikhonov", "seed": seed, **m})
             print(f"  seed={seed}: kl={m['kl_divergence']:.4f} corr_gen={m['mean_pairwise_corr_gen']:.4f} corr_true={m['mean_pairwise_corr_true']:.4f}")
 
         csho_summary = aggregate_over_seeds(per_seed)
@@ -157,16 +168,28 @@ def run():
                 "corr_pct_of_true": s["mean_pairwise_corr_gen"]["mean"] / s["mean_pairwise_corr_true"]["mean"] * 100.0,
             })
 
+        sig_metric_names = ["kl_divergence", "wasserstein2", "mi_mae", "mean_pairwise_corr_gen"]
+        for baseline_name, baseline_per_seed in [("ddpm", ddpm_per_seed), ("sdm", sdm_per_seed)]:
+            sig = compare_configs(baseline_per_seed, per_seed, metric_names=sig_metric_names)
+            for metric, s in sig.items():
+                sig_rows.append({"N": N, "comparison": f"csho_tikhonov_vs_{baseline_name}", "metric": metric, **s})
+
+    write_csv(per_seed_rows, os.path.join(OUT_DIR, "tikhonov_n_sweep_per_seed.csv"))
+    write_csv(sig_rows, os.path.join(OUT_DIR, "tikhonov_n_sweep_significance.csv"))
     write_csv(all_rows, os.path.join(OUT_DIR, "tikhonov_n_sweep_full.csv"))
     write_csv(summary_rows, os.path.join(OUT_DIR, "tikhonov_n_sweep_summary.csv"))
-    write_json({"lam": LAM, "beta": BETA, "sigma_by_n": SIGMA_BY_N, "n_sweep": N_SWEEP, "summary_rows": summary_rows}, os.path.join(OUT_DIR, "tikhonov_n_sweep_results.json"))
+    write_json(
+        {"lam": LAM, "beta": BETA, "sigma_by_n": SIGMA_BY_N, "n_sweep": N_SWEEP,
+         "n_diff_steps": N_DIFF_STEPS, "dt": DT, "summary_rows": summary_rows},
+        os.path.join(OUT_DIR, "tikhonov_n_sweep_results.json"),
+    )
 
     print("\n\n=== SUMMARY: N=2..5, DDPM vs SDM vs CSHO-Tikhonov (Anderson-corrected, lam=0.1) ===")
     print(f"{'N':>3} {'method':>16} {'KL':>10} {'corr_gen':>10} {'corr_true':>10} {'%true':>8}")
     for row in summary_rows:
         print(f"{row['N']:>3} {row['method']:>16} {row['kl_mean']:>10.4f} {row['corr_gen_mean']:>10.4f} {row['corr_true']:>10.4f} {row['corr_pct_of_true']:>8.1f}")
 
-    print(f"\nWrote results to {OUT_DIR}/")
+    print(f"\nWrote results to {OUT_DIR}/ (per-seed table for Wilcoxon: tikhonov_n_sweep_per_seed.csv; significance: tikhonov_n_sweep_significance.csv)")
     return summary_rows
 
 
@@ -176,6 +199,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--n-train-iters", type=int, default=2000)
     p.add_argument("--n-samples", type=int, default=4000, help="evaluation sample count for KL/correlation")
     p.add_argument("--n-sweep", default="2,3,4,5", help="comma-separated N values")
+    p.add_argument("--n-diff-steps", type=int, default=20,
+                    help="reverse/forward diffusion step count; must match --n-diff-steps passed to "
+                         "run_experiment.py for the DDPM/SDM baselines for a fair matched-budget comparison")
+    p.add_argument("--dt", type=float, default=None,
+                    help="per-step size; defaults to 1/n_diff_steps, holding the total diffusion "
+                         "horizon n_diff_steps*dt fixed at 1.0 as n_diff_steps changes")
     p.add_argument("--out-dir", default="results/experiment_3_synthetic/anderson_tikhonov_n_sweep")
     p.add_argument("--baseline-dir", default="results/experiment_3_synthetic/exact_prior_std_sweep",
                     help="directory containing N{n}_ddpm/ddpm_results.json and N{n}_sdm/sdm_results.json "
@@ -193,4 +222,6 @@ if __name__ == "__main__":
     N_SWEEP = [int(n) for n in _args.n_sweep.split(",") if n.strip()]
     OUT_DIR = _args.out_dir
     BASELINE_DIR = _args.baseline_dir
+    N_DIFF_STEPS = _args.n_diff_steps
+    DT = _args.dt if _args.dt is not None else 1.0 / N_DIFF_STEPS
     run()
