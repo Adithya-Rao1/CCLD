@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -36,6 +36,8 @@ def linearize_drift(
     use_gamma: bool,
     constant_k: bool,
     shape: Tuple[int, ...] = (2, 2),
+    scale_damping_with_time: bool = True,
+    time_scale_fn: Optional[Callable[[torch.Tensor, int], torch.Tensor]] = None,
 ) -> Tuple[np.ndarray, int]:
     n = int(torch.zeros(shape).numel())
 
@@ -44,6 +46,7 @@ def linearize_drift(
         dV = drift_fn_n(
             X, V, K_self, K_global, t, T, alpha, beta, gamma,
             coupling_matrix=coupling_matrix, use_gamma=use_gamma, constant_k=constant_k,
+            scale_damping_with_time=scale_damping_with_time, time_scale_fn=time_scale_fn,
         )
         dX = [V[i][0].reshape(-1) for i in range(N)]
         dV_flat = [dV[i][0].reshape(-1) for i in range(N)]
@@ -101,8 +104,13 @@ def hypoellipticity_check(
     G: torch.Tensor,
     shape: Tuple[int, ...] = (2, 2),
     tol: float = 1e-8,
+    scale_damping_with_time: bool = True,
+    time_scale_fn: Optional[Callable[[torch.Tensor, int], torch.Tensor]] = None,
 ) -> Dict:
-    A, n = linearize_drift(N, K_self, K_global, t, T, alpha, beta, gamma, coupling_matrix, use_gamma, constant_k, shape)
+    A, n = linearize_drift(
+        N, K_self, K_global, t, T, alpha, beta, gamma, coupling_matrix, use_gamma, constant_k, shape,
+        scale_damping_with_time=scale_damping_with_time, time_scale_fn=time_scale_fn,
+    )
     B = build_B_matrix(G, N, n)
     passed, min_eig, eigvals = controllability_check(A, B, tol)
     return {"passed": passed, "min_eig": min_eig, "eigvals": eigvals, "A": A, "B": B, "N": N, "n": n}

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 import torch
 
@@ -22,23 +22,11 @@ def _mean_frob_norm(tensors: List[torch.Tensor]) -> torch.Tensor:
 
 
 def _mean_per_sample(tensors: List[torch.Tensor]) -> torch.Tensor:
-    """Per-batch-element mean: reduces every tensor over all dims except dim 0 (the
-    shared batch dimension), then averages across the population's tensor list.
-
-    This is what makes the coupling term below capable of inducing genuine
-    per-sample statistical dependence between populations, rather than only
-    nudging each population's batch-aggregate mean toward the others' -- a
-    population's tensors can have arbitrarily different non-batch shapes (e.g.
-    different atom/node counts between populations) with no alignment or padding
-    needed, since only dim 0 (batch) has to match across populations, and it always
-    does by construction (every population's tensors come from the same batch).
-    """
     means = [t.float().reshape(t.shape[0], -1).mean(dim=1) for t in tensors]
     return torch.stack(means, dim=0).mean(dim=0)
 
 
 def _broadcast_per_sample(v: torch.Tensor, like: torch.Tensor) -> torch.Tensor:
-    """Reshape a (B,)-shaped per-sample value to broadcast against `like`'s full shape."""
     return v.view(v.shape[0], *([1] * (like.ndim - 1)))
 
 
@@ -55,7 +43,8 @@ def drift_fn_n(
     coupling_matrix: Optional[torch.Tensor] = None,
     use_gamma: bool = True,
     constant_k: bool = False,
-    s: float = 1e-8,
+    scale_damping_with_time: bool = True,
+    time_scale_fn: Optional[Callable[[torch.Tensor, int], torch.Tensor]] = None,
 ) -> List[List[torch.Tensor]]:
     N = len(X)
     if N < 2:
@@ -65,8 +54,7 @@ def drift_fn_n(
 
     if coupling_matrix is None:
         coupling_matrix = build_coupling_matrix(N, mode="mean_field", device=X[0][0].device, dtype=torch.float32)
-
-    time_scale = (T - t) / (t + T)
+    time_scale = time_scale_fn(t, T) if time_scale_fn is not None else (T - t) / (t + T)
 
     norm_f_k_self = [_mean_frob_norm(K_self[i]) for i in range(N)]
 
@@ -88,10 +76,14 @@ def drift_fn_n(
         dv_i = []
         for x, v in zip(X[i], V[i]):
             target_i = _broadcast_per_sample(target[i], x)
-            core = alpha[i] * omega_sq[i] * x + beta[i] * norm_f_k_global * (target_i - x)
+            confine = time_scale * (alpha[i] * omega_sq[i] * x + beta[i] * norm_f_k_global * (target_i - x))
             if use_gamma:
-                core = -gamma[i] * v + core
-            dv_i.append(time_scale * core)
+                damping = -gamma[i] * v
+                if scale_damping_with_time:
+                    damping = time_scale * damping
+                dv_i.append(damping + confine)
+            else:
+                dv_i.append(confine)
         dV.append(dv_i)
 
     return dV

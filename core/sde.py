@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import List, Literal, Optional, Tuple
+from typing import Callable, List, Literal, Optional, Tuple
 
 import torch
 
@@ -67,20 +67,16 @@ def em_step_n(
     dt: float,
     G: torch.Tensor,
     primary_index: int = 0,
+    scale_damping_with_time: bool = True,
+    time_scale_fn: Optional[Callable[[torch.Tensor, int], torch.Tensor]] = None,
 ):
     N = len(X)
     dV = drift_fn_n(
         X, V, K_self, K_global, t, T, alpha, beta, gamma,
         coupling_matrix=coupling_matrix_drift, use_gamma=use_gamma, constant_k=constant_k,
+        scale_damping_with_time=scale_damping_with_time, time_scale_fn=time_scale_fn,
     )
 
-    # Minus sign is required, not a style choice: drift_fn_n is an attracting restoring
-    # force, so the forward/noising process must run it in reverse (push away from
-    # equilibrium) to actually corrupt data into noise. reverse_step_n runs the same
-    # drift forward (+dv, see below) to pull noise back toward data. Matches production
-    # loss_fn.py::em_mean_multi_state's `v - dv*dt` (reverse_sampler.py's reverse_step
-    # uses `+dv`) -- do not "unify" these signs, that reintroduces a confirmed bug
-    # (see plan file i-m-trying-to-finish-synthetic-tiger.md, 2026-08-15 entry).
     mu = [[v - dv * dt for v, dv in zip(V[i], dV[i])] for i in range(N)]
 
     primary_shape = mu[0][primary_index].shape
@@ -124,12 +120,15 @@ def reverse_step_n(
     G: torch.Tensor,
     score_scale: float = 1.0,
     primary_index: int = 0,
+    scale_damping_with_time: bool = True,
+    time_scale_fn: Optional[Callable[[torch.Tensor, int], torch.Tensor]] = None,
 ):
     N = len(X)
     t_tensor = torch.as_tensor(t, device=X[0][0].device, dtype=X[0][0].dtype)
     dV = drift_fn_n(
         X, V, K_self, K_global, t_tensor, T, alpha, beta, gamma,
         coupling_matrix=coupling_matrix_drift, use_gamma=use_gamma, constant_k=constant_k,
+        scale_damping_with_time=scale_damping_with_time, time_scale_fn=time_scale_fn,
     )
     Sigma = G @ G.T
 

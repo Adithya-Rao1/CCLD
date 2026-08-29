@@ -30,9 +30,6 @@ ALL_METHODS = sorted(list(CSHO_METHODS) + ["ddpm", "sdm"])
 
 
 def _default_pairwise_weights(N: int, device=None) -> torch.Tensor:
-    # No obvious "more/less related" prior between arbitrary OU populations (unlike e.g. vision's
-    # depth<->normals), so pairwise defaults to a flat off-diagonal weight, matching image/pde's
-    # csho_pairwise default -- override by editing this if a real similarity structure is desired.
     W = torch.ones((N, N), device=device)
     W.fill_diagonal_(0.0)
     return W
@@ -94,6 +91,38 @@ class FlatScoreNet(nn.Module):
         return [out[:, i : i + 1] for i in range(self.N)]
 
 
+class SiloedCoupledScoreNet(nn.Module):
+    def __init__(self, N: int, hidden: int = 64, n_layers: int = 3, time_dim: int = 16):
+        super().__init__()
+        self.N = N
+        self.time_embed = SinusoidalTimeEmbed(time_dim)
+        self.nets = nn.ModuleList([_mlp(2 + time_dim, 1, hidden, n_layers) for _ in range(N)])
+
+    def forward(self, X: List[List[torch.Tensor]], V_query: List[List[torch.Tensor]], t_n) -> List[List[torch.Tensor]]:
+        B = V_query[0][0].shape[0]
+        device, dtype = V_query[0][0].device, V_query[0][0].dtype
+        t_emb = self.time_embed(t_n, B, device, dtype)
+        out = []
+        for i in range(self.N):
+            oi = self.nets[i](torch.cat([X[i][0], V_query[i][0], t_emb], dim=-1))
+            out.append([oi])
+        return out
+
+
+class SiloedFlatScoreNet(nn.Module):
+    def __init__(self, N: int, hidden: int = 64, n_layers: int = 3, time_dim: int = 16):
+        super().__init__()
+        self.N = N
+        self.time_embed = SinusoidalTimeEmbed(time_dim)
+        self.nets = nn.ModuleList([_mlp(1 + time_dim, 1, hidden, n_layers) for _ in range(N)])
+
+    def forward(self, X: List[torch.Tensor], t_n) -> List[torch.Tensor]:
+        B = X[0].shape[0]
+        device, dtype = X[0].device, X[0].dtype
+        t_emb = self.time_embed(t_n, B, device, dtype)
+        return [self.nets[i](torch.cat([X[i], t_emb], dim=-1)) for i in range(self.N)]
+
+
 def _make_conditioning(N: int, B: int, k_reference: float, device, dtype=torch.float32):
     K_self = [[torch.full((B, 1), k_reference, device=device, dtype=dtype)] for _ in range(N)]
     K_global = [torch.full((B, 1), k_reference, device=device, dtype=dtype) for _ in range(N)]
@@ -144,6 +173,39 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--k-reference", type=float, default=1.0)
     p.add_argument("--constant-k", action="store_true")
     p.add_argument("--diffusion-mode", default="shared", choices=["shared", "independent"])
+    p.add_argument("--siloed-score-net", action="store_true",
+                    help="Use SiloedCoupledScoreNet/SiloedFlatScoreNet instead of "
+                         "CoupledScoreNet/FlatScoreNet -- each population gets its own "
+                         "private sub-network (sees only its own X_i,V_i,t, never other "
+                         "populations' values). Isolates whether generated correlation "
+                         "comes from the drift's coupling term specifically, vs. from a "
+                         "shared network's joint access to all populations at every step "
+                         "(2026-08-28: CoupledScoreNet/FlatScoreNet both concatenate all "
+                         "N populations as input by default -- this flag removes that "
+                         "channel so only method=csho's drift-level coupling remains).")
+    p.add_argument("--sigma-schedule", default="constant", choices=["constant", "linear_t_over_T"],
+                    help="constant: fixed --sigma throughout (production default). "
+                         "linear_t_over_T: sigma(t) = --sigma * (t/T), from synthetic/exp02 -- "
+                         "backfires (see exp02_linear_noise_schedule_README.md): the corruption "
+                         "map is unstable, so early noise gets amplified most and ramping noise "
+                         "up wastes exactly those injections. Only affects method=csho.")
+    p.add_argument("--time-scale-schedule", default="original", choices=["original", "vp_linear"],
+                    help="original: time_scale=(T-t)/(t+T) -- DECREASING in t, so the "
+                         "pull-together (confinement+coupling+damping) force is exactly "
+                         "0 at t=T (generation start, right after drawing from the prior) "
+                         "and strongest at t=1 (generation end, right before data) -- "
+                         "backwards from how VP-SDE's beta(t) behaves (2026-08-28 "
+                         "diagnosis: this is why generated variance grows during "
+                         "sampling instead of shrinking, and correlation only gets a "
+                         "narrow late window to build). "
+                         "vp_linear: time_scale=t/T -- INCREASING in t, mirroring VP-SDE's "
+                         "beta(t) shape (core/baselines.py::vp_beta_t) rescaled to CSHO's "
+                         "own alpha/beta/gamma magnitude range (not VP-SDE's raw "
+                         "beta_min=0.1/beta_max=20, which would over-scale relative to "
+                         "what those are calibrated for) -- strong pull right when "
+                         "generation starts from noise, tapering as it approaches data. "
+                         "Since t_idx in {1,...,T} never reaches 0, this never hits "
+                         "exactly zero at either endpoint either. Only affects method=csho.")
 
     p.add_argument("--n-diff-steps", type=int, default=20)
     p.add_argument("--dt", type=float, default=0.05)
@@ -199,12 +261,39 @@ def parse_args(argv=None) -> argparse.Namespace:
     return args
 
 
-def _diffusion_mode_g(args, N: int, coupling: torch.Tensor, device) -> torch.Tensor:
-    if args.diffusion_mode == "independent":
-        g_per_task = [args.sigma * (0.8 + 0.4 * i / max(N - 1, 1)) for i in range(N)]
-        return build_g_matrix_n(torch.tensor(args.sigma, device=device), N, diffusion_mode="independent",
-                                 g_per_task=g_per_task, coupling_matrix=coupling)
-    return build_g_matrix_n(torch.tensor(args.sigma, device=device), N, diffusion_mode="shared")
+def _vp_linear_time_scale(t, T) -> torch.Tensor:
+    return torch.as_tensor(t, dtype=torch.float32) / float(T)
+
+
+def _time_scale_fn_for(args):
+    """Returns None (drift_fn_n's default (T-t)/(t+T)) or _vp_linear_time_scale,
+    per --time-scale-schedule. None is threaded through unchanged everywhere this is
+    used (drift_fn_n's own default), so "original" reproduces the exact prior behavior."""
+    if args.time_scale_schedule == "vp_linear":
+        return _vp_linear_time_scale
+    return None
+
+
+def _diffusion_mode_g_fn(args, N: int, coupling: torch.Tensor, device):
+    """Returns g_fn(t, T) -> (N,N) diffusion matrix. sigma_schedule="constant"
+    (production default) ignores t; "linear_t_over_T" (synthetic/exp02) scales --sigma
+    by (t/T) -- see exp02's README in results/schedule_experiments/ for why this
+    backfires (the corruption map is unstable, so early noise gets amplified most and
+    ramping noise up wastes exactly those injections)."""
+    def sigma_at(t, T) -> float:
+        if args.sigma_schedule == "linear_t_over_T":
+            return args.sigma * (float(t) / float(T))
+        return args.sigma
+
+    def g_fn(t, T) -> torch.Tensor:
+        sigma_t = sigma_at(t, T)
+        if args.diffusion_mode == "independent":
+            g_per_task = [sigma_t * (0.8 + 0.4 * i / max(N - 1, 1)) for i in range(N)]
+            return build_g_matrix_n(torch.tensor(sigma_t, device=device), N, diffusion_mode="independent",
+                                     g_per_task=g_per_task, coupling_matrix=coupling)
+        return build_g_matrix_n(torch.tensor(sigma_t, device=device), N, diffusion_mode="shared")
+
+    return g_fn
 
 
 def _build_csho_state(args: argparse.Namespace, device):
@@ -218,12 +307,28 @@ def _build_csho_state(args: argparse.Namespace, device):
         coupling = build_coupling_matrix(N, mode="pairwise", weights=weights, device=device)
     else:
         coupling = build_coupling_matrix(N, mode=mode, device=device)
-    gamma = calibrate_gammas_for_regime(args.alpha, [args.k_reference] * N, args.damping_regime, args.target_zeta)
-    G = _diffusion_mode_g(args, N, coupling, device)
-    return coupling, gamma, G
+    peak_k_global = 1.0 if args.constant_k else args.k_reference
+    gamma = calibrate_gammas_for_regime(
+        args.alpha, [args.k_reference + peak_k_global] * N, args.damping_regime, args.target_zeta,
+    )
+    g_fn = _diffusion_mode_g_fn(args, N, coupling, device)
+    return coupling, gamma, g_fn
 
 
-def _estimate_prior_std(args, gt: GroundTruthCoupledOU, K_self, K_global, coupling, gamma, G, device) -> List[float]:
+def _estimate_prior_std(args, gt: GroundTruthCoupledOU, K_self, K_global, coupling, gamma, g_fn, device) -> Tuple[List[float], List[float]]:
+    if args.sigma_schedule == "constant":
+        from synthetic.schedule_diagnostics import exact_corruption_covariance
+        cov0 = torch.zeros(2 * args.N, 2 * args.N, device=device)
+        cov0[: args.N, : args.N] = gt.stationary_covariance().to(device)
+        G_fixed = g_fn(1, args.n_diff_steps)
+        Sigma_T = exact_corruption_covariance(
+            args.N, coupling, gamma, args.alpha, args.beta, args.k_reference, args.n_diff_steps, args.dt,
+            G_fixed, cov0, constant_k=args.constant_k, time_scale_fn=_time_scale_fn_for(args),
+        )
+        prior_std_x = [max(Sigma_T[i, i].sqrt().item(), 1e-3) for i in range(args.N)]
+        prior_std_v = [max(Sigma_T[args.N + i, args.N + i].sqrt().item(), 1e-3) for i in range(args.N)]
+        return prior_std_x, prior_std_v
+
     B = args.prior_probe_samples
     X0 = gt.sample_stationary(B).to(device)
     X = [[X0[:, i : i + 1].clone()] for i in range(args.N)]
@@ -236,16 +341,20 @@ def _estimate_prior_std(args, gt: GroundTruthCoupledOU, K_self, K_global, coupli
     for step in range(1, args.n_diff_steps + 1):
         X, V, _, _, _ = em_step_n(
             X, V, K_self_p, K_global_p, step, args.n_diff_steps,
-            args.alpha, args.beta, gamma, coupling, True, args.constant_k, args.dt, G,
+            args.alpha, args.beta, gamma, coupling, True, args.constant_k, args.dt, g_fn(step, args.n_diff_steps),
+            time_scale_fn=_time_scale_fn_for(args),
         )
-    return [max(X[i][0].std().item(), 1e-3) for i in range(args.N)]
+    prior_std_x = [max(X[i][0].std().item(), 1e-3) for i in range(args.N)]
+    prior_std_v = [max(V[i][0].std().item(), 1e-3) for i in range(args.N)]
+    return prior_std_x, prior_std_v
 
 
-def train_csho(args, gt: GroundTruthCoupledOU, device) -> Tuple[nn.Module, List[float], torch.Tensor, List[float]]:
+def train_csho(args, gt: GroundTruthCoupledOU, device) -> Tuple[nn.Module, List[float], torch.Tensor, Tuple[List[float], List[float]]]:
     N = args.N
-    coupling, gamma, G = _build_csho_state(args, device)
+    coupling, gamma, g_fn = _build_csho_state(args, device)
     K_self, K_global = _make_conditioning(N, args.batch_size, args.k_reference, device)
-    score_net = CoupledScoreNet(N, args.hidden_dim, args.n_layers, args.time_embed_dim).to(device)
+    net_cls = SiloedCoupledScoreNet if args.siloed_score_net else CoupledScoreNet
+    score_net = net_cls(N, args.hidden_dim, args.n_layers, args.time_embed_dim).to(device)
     optimizer = torch.optim.Adam(score_net.parameters(), lr=args.lr)
 
     for _ in range(args.n_train_iters):
@@ -254,54 +363,40 @@ def train_csho(args, gt: GroundTruthCoupledOU, device) -> Tuple[nn.Module, List[
         V = [[torch.zeros_like(X0[:, i : i + 1])] for i in range(N)]
         t_idx = torch.randint(1, args.n_diff_steps + 1, (1,)).item()
 
-        # Chain t_idx real em_step_n calls from data (not a single jump straight to
-        # t_idx). A single Euler-Maruyama step only approximates a SHORT timespan
-        # well (the assumption NDSM's own derivation relies on); jumping directly
-        # from data to t_idx in one step badly misrepresents the true t_idx-step
-        # marginal once t_idx>1, increasingly so as t_idx grows -- this was
-        # confirmed empirically (KL divergence grew ~40x per doubling of
-        # n_diff_steps at fixed training budget with the single-jump version, and
-        # got WORSE with more training as the network fit the flawed target more
-        # precisely). Matches production's _simulate_and_sample_ndsm, which chains
-        # through the real trajectory rather than jumping.
         for step in range(1, t_idx + 1):
             X_next, V_next, mu, z_list, sigma_list = em_step_n(
                 X, V, K_self, K_global, step, args.n_diff_steps,
-                args.alpha, args.beta, gamma, coupling, True, args.constant_k, args.dt, G,
+                args.alpha, args.beta, gamma, coupling, True, args.constant_k, args.dt, g_fn(step, args.n_diff_steps),
+                time_scale_fn=_time_scale_fn_for(args),
             )
             X, V = X_next, V_next
         loss = ndsm_loss_n(X_next, score_net, V_next, mu, z_list, sigma_list, t_n=t_idx)
 
         optimizer.zero_grad()
         loss.backward()
-        # NDSM's loss is only bounded below in expectation, not pointwise (its
-        # cross term z*(s(Y)-s(mu)) is unbounded for any single sample) -- without
-        # clipping, weight/gradient norms grow without bound over training and
-        # sampling quality degrades the more you train (confirmed empirically:
-        # KL divergence went 5.5->257 over 200->8000 iterations, unclipped).
-        # Matches production train_cpu.py's unconditional clip_grad_norm_ with
-        # the same default max_norm=1.0.
         torch.nn.utils.clip_grad_norm_(score_net.parameters(), max_norm=args.grad_clip_norm)
         optimizer.step()
 
-    prior_std = _estimate_prior_std(args, gt, K_self, K_global, coupling, gamma, G, device)
-    return score_net, gamma, coupling, prior_std
+    prior_std_x, prior_std_v = _estimate_prior_std(args, gt, K_self, K_global, coupling, gamma, g_fn, device)
+    return score_net, gamma, coupling, (prior_std_x, prior_std_v)
 
 
 @torch.no_grad()
-def sample_csho(args, score_net, gamma, coupling, prior_std: List[float], device) -> torch.Tensor:
+def sample_csho(args, score_net, gamma, coupling, prior_std, device) -> torch.Tensor:
     N = args.N
-    G = _diffusion_mode_g(args, N, coupling, device)
+    g_fn = _diffusion_mode_g_fn(args, N, coupling, device)
     K_self, K_global = _make_conditioning(N, args.n_samples, args.k_reference, device)
+    prior_std_x, prior_std_v = prior_std
 
-    X = [[prior_std[i] * torch.randn(args.n_samples, 1, device=device)] for i in range(N)]
-    V = [[prior_std[i] * torch.randn(args.n_samples, 1, device=device)] for i in range(N)]
+    X = [[prior_std_x[i] * torch.randn(args.n_samples, 1, device=device)] for i in range(N)]
+    V = [[prior_std_v[i] * torch.randn(args.n_samples, 1, device=device)] for i in range(N)]
 
     for t_idx in reversed(range(1, args.n_diff_steps + 1)):
         score_outputs = score_net(X, V, t_idx)
         X, V = reverse_step_n(
             X, V, K_self, K_global, score_outputs, t_idx, args.n_diff_steps,
-            args.alpha, args.beta, gamma, coupling, True, args.constant_k, args.dt, G,
+            args.alpha, args.beta, gamma, coupling, True, args.constant_k, args.dt, g_fn(t_idx, args.n_diff_steps),
+            time_scale_fn=_time_scale_fn_for(args),
         )
     return torch.cat([X[i][0] for i in range(N)], dim=-1)
 
@@ -309,7 +404,8 @@ def sample_csho(args, score_net, gamma, coupling, prior_std: List[float], device
 def train_ddpm(args, gt: GroundTruthCoupledOU, device) -> Tuple[nn.Module, torch.Tensor, torch.Tensor, torch.Tensor]:
     N = args.N
     ac, betas, alphas = make_ddpm_schedule(args.n_diff_steps, device=device)
-    score_net = FlatScoreNet(N, args.hidden_dim, args.n_layers, args.time_embed_dim).to(device)
+    flat_net_cls = SiloedFlatScoreNet if args.siloed_score_net else FlatScoreNet
+    score_net = flat_net_cls(N, args.hidden_dim, args.n_layers, args.time_embed_dim).to(device)
     optimizer = torch.optim.Adam(score_net.parameters(), lr=args.lr)
 
     for _ in range(args.n_train_iters):
@@ -339,7 +435,8 @@ def sample_ddpm(args, score_net, ac, betas, alphas, device) -> torch.Tensor:
 
 def train_sdm(args, gt: GroundTruthCoupledOU, device) -> nn.Module:
     N = args.N
-    score_net = FlatScoreNet(N, args.hidden_dim, args.n_layers, args.time_embed_dim).to(device)
+    flat_net_cls = SiloedFlatScoreNet if args.siloed_score_net else FlatScoreNet
+    score_net = flat_net_cls(N, args.hidden_dim, args.n_layers, args.time_embed_dim).to(device)
     optimizer = torch.optim.Adam(score_net.parameters(), lr=args.lr)
     dt_step = 1.0 / args.n_diff_steps
 
@@ -375,25 +472,23 @@ def sample_sdm(args, score_net, device) -> torch.Tensor:
     return torch.cat(X, dim=-1)
 
 
-def _measure_mixing_time(args, gt: GroundTruthCoupledOU, coupling, gamma, G, device) -> Tuple[float, float]:
+def _measure_mixing_time(args, gt: GroundTruthCoupledOU, coupling, gamma, device) -> Tuple[float, float]:
     N = args.N
     K_self, K_global = _make_conditioning(N, 1, args.k_reference, device)
     X0 = gt.sample_stationary(1).to(device)
     X = [[X0[:, i : i + 1].clone()] for i in range(N)]
     V = [[torch.zeros_like(X0[:, i : i + 1])] for i in range(N)]
     t_fixed = args.mixing_t_fixed
+    g_fn = _diffusion_mode_g_fn(args, N, coupling, device)
+    G_fixed = g_fn(t_fixed, args.n_diff_steps)
 
-    # Repeated application at a fixed t needs a stable (attracting) kernel to have
-    # a meaningful mixing time at all -- em_step_n is deliberately the repelling
-    # corruption direction (see its docstring/comment) and has no equilibrium under
-    # indefinite repetition. reverse_step_n with a zero score gives the generative
-    # (attracting) direction's own intrinsic mixing behavior instead.
     zero_score = [[torch.zeros_like(V[i][0])] for i in range(N)]
     trace = torch.zeros(args.mixing_n_steps)
     for step in range(args.mixing_n_steps):
         X, V = reverse_step_n(
             X, V, K_self, K_global, zero_score, t_fixed, args.n_diff_steps,
-            args.alpha, args.beta, gamma, coupling, True, args.constant_k, args.dt, G,
+            args.alpha, args.beta, gamma, coupling, True, args.constant_k, args.dt, G_fixed,
+            time_scale_fn=_time_scale_fn_for(args),
         )
         trace[step] = torch.stack([X[i][0].mean() for i in range(N)]).mean()
 
@@ -412,8 +507,19 @@ def evaluate_sampling_quality(generated: torch.Tensor, gt: GroundTruthCoupledOU)
     mi_true = gt.pairwise_mutual_information()
     off_diag = ~torch.eye(gt.N, dtype=torch.bool)
     mi_mae = (mi_gen - mi_true).abs()[off_diag].mean().item() if gt.N > 1 else 0.0
+    std_gen = cov_gen.diagonal().clamp_min(1e-12).sqrt()
+    corr_gen = cov_gen / (std_gen.unsqueeze(0) * std_gen.unsqueeze(1))
+    std_true = cov_true.diagonal().clamp_min(1e-12).sqrt()
+    corr_true = cov_true / (std_true.unsqueeze(0) * std_true.unsqueeze(1))
+    mean_corr_gen = corr_gen[off_diag].mean().item() if gt.N > 1 else 0.0
+    mean_corr_true = corr_true[off_diag].mean().item() if gt.N > 1 else 0.0
+    corr_mae = (corr_gen - corr_true).abs()[off_diag].mean().item() if gt.N > 1 else 0.0
 
-    return {"kl_divergence": float(kl.item()), "wasserstein2": float(w2.item()), "mi_mae": float(mi_mae)}
+    return {
+        "kl_divergence": float(kl.item()), "wasserstein2": float(w2.item()), "mi_mae": float(mi_mae),
+        "mean_pairwise_corr_gen": float(mean_corr_gen), "mean_pairwise_corr_true": float(mean_corr_true),
+        "pairwise_corr_mae": float(corr_mae),
+    }
 
 
 def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
@@ -439,16 +545,17 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
     metrics = evaluate_sampling_quality(generated, gt)
 
     if args.method in CSHO_METHODS:
-        _, gamma_full, G = _build_csho_state(args, device)
-        autocorr_lag1, iac_time = _measure_mixing_time(args, gt, coupling, gamma_full, G, device)
+        _, gamma_full, g_fn = _build_csho_state(args, device)
+        autocorr_lag1, iac_time = _measure_mixing_time(args, gt, coupling, gamma_full, device)
         metrics["autocorr_lag1"] = autocorr_lag1
         metrics["integrated_autocorr_time"] = iac_time
 
         K_self_h, K_global_h = _make_hypo_conditioning(args.N, seed)
+        G_mid = g_fn(args.n_diff_steps / 2.0, args.n_diff_steps)
         hypo = hypoellipticity_check(
             N=args.N, K_self=K_self_h, K_global=K_global_h, t=torch.tensor(args.n_diff_steps / 2.0), T=args.n_diff_steps,
             alpha=args.alpha, beta=args.beta, gamma=gamma_full, coupling_matrix=coupling.cpu(),
-            use_gamma=True, constant_k=args.constant_k, G=G.cpu(),
+            use_gamma=True, constant_k=args.constant_k, G=G_mid.cpu(), time_scale_fn=_time_scale_fn_for(args),
         )
         metrics["hypo_passed"] = float(hypo["passed"])
         metrics["hypo_min_eig"] = float(hypo["min_eig"])
