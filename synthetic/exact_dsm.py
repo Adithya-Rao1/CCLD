@@ -56,6 +56,75 @@ def _noise_injection_matrix(G: torch.Tensor, dt: float) -> torch.Tensor:
     return Nmat
 
 
+def _reverse_step_matrix(A_vx: torch.Tensor, A_vv: torch.Tensor, dt: float) -> torch.Tensor:
+    Nd = A_vx.shape[0]
+    I = torch.eye(Nd, device=A_vx.device, dtype=A_vx.dtype)
+    M = torch.zeros(2 * Nd, 2 * Nd, device=A_vx.device, dtype=A_vx.dtype)
+    M[:Nd, :Nd] = I + dt**2 * A_vx
+    M[:Nd, Nd:] = -dt * (I - dt * A_vv)
+    M[Nd:, :Nd] = -dt * A_vx
+    M[Nd:, Nd:] = I - dt * A_vv
+    return M
+
+
+def _reverse_noise_injection_matrix(G: torch.Tensor, dt: float) -> torch.Tensor:
+    Nd = G.shape[0]
+    sqrt_dt = dt**0.5
+    Nmat = torch.zeros(2 * Nd, Nd, device=G.device, dtype=G.dtype)
+    Nmat[:Nd, :] = -dt * sqrt_dt * G
+    Nmat[Nd:, :] = sqrt_dt * G
+    return Nmat
+
+
+def roundtrip_leak_snr(
+    N: int, gamma_self: float, gamma_couple: float, alpha: List[float], k_reference: float,
+    cov_data: torch.Tensor, T: int, dt: float, time_scale_fn, sigma_ref: float = 1.0,
+) -> float:
+    dtype = cov_data.dtype
+    beta_zero = [0.0] * N
+    Phi = torch.eye(2 * N, dtype=dtype)
+    Sigma = torch.zeros(2 * N, 2 * N, dtype=dtype)
+    G = sigma_ref * torch.eye(N, dtype=dtype)
+
+    for t in range(1, T + 1):
+        A_vx, A_vv = _extract_Avx_Avv_coupled_gamma(N, gamma_self, gamma_couple, alpha, beta_zero, k_reference, None, t, T, False, time_scale_fn)
+        M = _forward_step_matrix(A_vx, A_vv, dt)
+        Nmat = _noise_injection_matrix(G, dt)
+        Phi = M @ Phi
+        Sigma = M @ Sigma @ M.T + Nmat @ Nmat.T
+
+    for t in range(T, 0, -1):
+        A_vx, A_vv = _extract_Avx_Avv_coupled_gamma(N, gamma_self, gamma_couple, alpha, beta_zero, k_reference, None, t, T, False, time_scale_fn)
+        M = _reverse_step_matrix(A_vx, A_vv, dt)
+        Nmat = _reverse_noise_injection_matrix(G, dt)
+        Phi = M @ Phi
+        Sigma = M @ Sigma @ M.T + Nmat @ Nmat.T
+
+    Phi_x = Phi[:N, :N]
+    cov_final_x = Phi_x @ cov_data @ Phi_x.T + Sigma[:N, :N]
+
+    def mean_pairwise_corr(cov: torch.Tensor) -> float:
+        std = cov.diagonal().sqrt()
+        corr = cov / (std[:, None] * std[None, :])
+        off = corr - torch.diag(torch.diag(corr))
+        return off.sum().item() / (N * (N - 1))
+
+    rho_true = mean_pairwise_corr(cov_data)
+    rho_leak = mean_pairwise_corr(cov_final_x)
+    x = rho_leak / rho_true
+    return x / (1 - x)
+
+
+def calibrate_sigma_for_leak(
+    N: int, gamma_self: float, gamma_couple: float, alpha: List[float], k_reference: float,
+    cov_data: torch.Tensor, T: int, dt: float, time_scale_fn, leak_fraction: float = 0.01,
+) -> float:
+    snr_ref = roundtrip_leak_snr(N, gamma_self, gamma_couple, alpha, k_reference, cov_data, T, dt, time_scale_fn, sigma_ref=1.0)
+    k = snr_ref * 1.0**2
+    snr_target = leak_fraction / (1 - leak_fraction)
+    return (k / snr_target) ** 0.5
+
+
 def precompute_transition_params(
     N: int, gamma_self: float, gamma_couple: float, alpha: List[float], beta: List[float],
     k_reference: float, coupling, T: int, dt: float, g_fn, constant_k: bool, time_scale_fn,

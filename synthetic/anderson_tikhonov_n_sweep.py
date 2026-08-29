@@ -13,7 +13,7 @@ from core.sde import build_g_matrix_n
 from core.stats import aggregate_over_seeds, compare_configs
 from synthetic.anderson_sde import anderson_em_step_coupled_gamma, anderson_reverse_step_coupled_gamma
 from synthetic.drift_coupled_gamma import calibrate_coupled_gammas
-from synthetic.exact_dsm import precompute_transition_params, sample_and_tikhonov_score_target
+from synthetic.exact_dsm import calibrate_sigma_for_leak, precompute_transition_params, sample_and_tikhonov_score_target
 from synthetic.ground_truth_sde import GroundTruthCoupledOU, make_ground_truth
 from synthetic.run_experiment import CoupledScoreNet, _make_conditioning, _vp_linear_time_scale, evaluate_sampling_quality
 
@@ -28,9 +28,21 @@ COUPLING_STRENGTH = 0.6
 BETA = 1.0
 TIME_SCALE_FN = _vp_linear_time_scale
 
-# Precomputed via the exact 1%-leak-threshold closed-form (see conversation/checkpoint):
-# sigma_N = sqrt(SNR_ref(sigma=1,N) / 0.010101). 
-SIGMA_BY_N = {2: 6.6554, 3: 5.3462, 4: 5.1714, 5: 5.0219}
+LEAK_FRACTION = 0.01
+_sigma_cache: Dict[Tuple[int, int], float] = {}
+
+
+def _get_sigma_n(N: int) -> float:
+    key = (N, N_DIFF_STEPS)
+    if key not in _sigma_cache:
+        gamma_self_dc, gamma_couple_dc = calibrate_coupled_gammas(ALPHA_V, 0.0, K_REFERENCE, K_REFERENCE, N, target_zeta=TARGET_ZETA)
+        gt_ref = make_ground_truth(N, COUPLING_STRENGTH, seed=0, base_decay=1.0, sigma_scale=1.0)
+        cov_data = gt_ref.stationary_covariance()
+        _sigma_cache[key] = calibrate_sigma_for_leak(
+            N, gamma_self_dc, gamma_couple_dc, [ALPHA_V] * N, K_REFERENCE, cov_data,
+            N_DIFF_STEPS, DT, TIME_SCALE_FN, leak_fraction=LEAK_FRACTION,
+        )
+    return _sigma_cache[key]
 
 N_TRAIN_ITERS = 2000
 N_SAMPLES = 4000
@@ -119,7 +131,7 @@ def sample_csho_anderson(N: int, sigma: float, score_net, gamma_self, gamma_coup
 def train_one_seed(N: int, seed: int) -> Dict[str, float]:
     torch.manual_seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    sigma = SIGMA_BY_N[N]
+    sigma = _get_sigma_n(N)
     gt = make_ground_truth(N, COUPLING_STRENGTH, seed, 1.0, 1.0, device=device)
     score_net, gamma_self, gamma_couple, coupling, prior_std = train_csho_tikhonov(N, sigma, gt, device)
     generated = sample_csho_anderson(N, sigma, score_net, gamma_self, gamma_couple, coupling, prior_std, device)
@@ -147,7 +159,7 @@ def run():
             for seed, m in baseline_per_seed.items():
                 per_seed_rows.append({"N": N, "method": method_name, "seed": seed, **m})
 
-        print(f"\n=== N={N} (sigma={SIGMA_BY_N[N]}, lam={LAM}, beta={BETA}, n_diff_steps={N_DIFF_STEPS}, dt={DT}) ===")
+        print(f"\n=== N={N} (sigma={_get_sigma_n(N):.4f}, lam={LAM}, beta={BETA}, n_diff_steps={N_DIFF_STEPS}, dt={DT}) ===")
         per_seed = {}
         for seed in SEEDS:
             m = train_one_seed(N, seed)
@@ -179,7 +191,7 @@ def run():
     write_csv(all_rows, os.path.join(OUT_DIR, "tikhonov_n_sweep_full.csv"))
     write_csv(summary_rows, os.path.join(OUT_DIR, "tikhonov_n_sweep_summary.csv"))
     write_json(
-        {"lam": LAM, "beta": BETA, "sigma_by_n": SIGMA_BY_N, "n_sweep": N_SWEEP,
+        {"lam": LAM, "beta": BETA, "sigma_by_n": {N: _get_sigma_n(N) for N in N_SWEEP}, "n_sweep": N_SWEEP,
          "n_diff_steps": N_DIFF_STEPS, "dt": DT, "summary_rows": summary_rows},
         os.path.join(OUT_DIR, "tikhonov_n_sweep_results.json"),
     )
