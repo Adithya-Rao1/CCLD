@@ -39,16 +39,20 @@ for N in 2 3 4 5; do
   done
 done
 
-echo "--- CSHO-Tikhonov champion, N=2..5 ---"
-python -m synthetic.anderson_tikhonov_n_sweep \
-  --seeds "${SEEDS}" \
-  --n-train-iters "${N_ITERS}" \
-  --n-samples "${N_SAMPLES}" \
-  --n-diff-steps "${N_DIFF_STEPS}" \
-  --dt "${DT}" \
-  --n-sweep 2,3,4,5 \
-  --out-dir "${CSHO_OUT_DIR}" \
-  --baseline-dir "${BASELINE_DIR}"
+if [ -f "${CSHO_OUT_DIR}/tikhonov_n_sweep_summary.csv" ]; then
+  echo "--- CSHO-Tikhonov champion, N=2..5: already present at ${CSHO_OUT_DIR}, skipping ---"
+else
+  echo "--- CSHO-Tikhonov champion, N=2..5: training ---"
+  python -m synthetic.anderson_tikhonov_n_sweep \
+    --seeds "${SEEDS}" \
+    --n-train-iters "${N_ITERS}" \
+    --n-samples "${N_SAMPLES}" \
+    --n-diff-steps "${N_DIFF_STEPS}" \
+    --dt "${DT}" \
+    --n-sweep 2,3,4,5 \
+    --out-dir "${CSHO_OUT_DIR}" \
+    --baseline-dir "${BASELINE_DIR}"
+fi
 
 echo "=== Done. Final comparison written to ${CSHO_OUT_DIR}/tikhonov_n_sweep_summary.csv ==="
 echo "=== Per-seed table (for Wilcoxon): ${CSHO_OUT_DIR}/tikhonov_n_sweep_per_seed.csv ==="
