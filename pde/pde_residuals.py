@@ -95,9 +95,35 @@ def _te_heat_mater_iden(elliptic_params: torch.Tensor, H: int, W: int, device, d
     return torch.where(distance_sq <= r ** 2, torch.ones_like(distance_sq), -torch.ones_like(distance_sq))
 
 
+TE_HEAT_MATER_INSIDE_RANGE = (1e11, 3e11)
+TE_HEAT_MATER_INSIDE_NORM_RANGE = (0.1, 0.9)
+TE_HEAT_MATER_OUTSIDE_RANGE = (10.0, 20.0)
+TE_HEAT_MATER_OUTSIDE_NORM_RANGE = (-0.9, -0.1)
+
+
+def te_heat_normalize_mater(mater: torch.Tensor, elliptic_params: torch.Tensor) -> torch.Tensor:
+    device, dtype = mater.device, mater.dtype
+    _, H, W = mater.shape
+    mater_iden = _te_heat_mater_iden(elliptic_params.to(device=device, dtype=dtype), H, W, device, dtype)
+
+    lo_in, hi_in = TE_HEAT_MATER_INSIDE_RANGE
+    nlo_in, nhi_in = TE_HEAT_MATER_INSIDE_NORM_RANGE
+    norm_in = (mater - lo_in) * (nhi_in - nlo_in) / (hi_in - lo_in) + nlo_in
+
+    lo_out, hi_out = TE_HEAT_MATER_OUTSIDE_RANGE
+    nlo_out, nhi_out = TE_HEAT_MATER_OUTSIDE_NORM_RANGE
+    norm_out = (mater - lo_out) * (nhi_out - nlo_out) / (hi_out - lo_out) + nlo_out
+
+    return torch.where(mater_iden > 1e-5, norm_in, norm_out)
+
+
+def _te_heat_positive_temperature(T_raw: torch.Tensor, floor: float = 1.0) -> torch.Tensor:
+    return F.softplus(T_raw) + floor
+
+
 def te_heat_residual(fields: Dict[str, torch.Tensor], elliptic_params: torch.Tensor) -> Dict[str, torch.Tensor]:
     mater = fields["mater"]
-    T = fields["T"].clamp(min=1.0)
+    T = _te_heat_positive_temperature(fields["T"])
     Ez = torch.complex(fields["Ez_re"], fields["Ez_im"])
 
     device, dtype = mater.device, mater.dtype

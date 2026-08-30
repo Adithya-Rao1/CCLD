@@ -22,7 +22,18 @@ from synthetic.anderson_sde import anderson_em_step_coupled_gamma, anderson_reve
 from synthetic.drift_coupled_gamma import calibrate_coupled_gammas
 from synthetic.exact_dsm import calibrate_sigma_for_leak, precompute_transition_params, sample_and_tikhonov_score_target
 from pde.dataset import ALL_PROBLEMS, MultiPhysicsFieldDataset, collate_fn
-from pde.pde_residuals import e_flow_residual, pde_residual_metric, te_heat_residual, va_residual
+from pde.pde_residuals import e_flow_residual, pde_residual_metric, te_heat_normalize_mater, te_heat_residual, va_residual
+
+
+def _model_input_conditioning(args, batch, conditioning):
+    # TE_heat's 'mater' arrives in raw physical units (needed as-is by te_heat_residual); the
+    # network itself needs Multiphysics-Bench's own NN-input normalization (confirmed exactly via
+    # a real TE_heat sample, pde/pde_residuals.py::te_heat_normalize_mater), which this applies
+    # only to a copy fed to the model -- `conditioning`/`batch["conditioning"]` stay raw for the
+    # residual computation.
+    if args.problem == "TE_heat":
+        return te_heat_normalize_mater(conditioning[:, 0], batch["elliptic_params"]).unsqueeze(1)
+    return conditioning
 from pde.model import (
     FlatScoreNetwork, MultiPhysicsScoreNetwork, PhysicsModel, make_flat_score_fn, make_score_fn,
 )
@@ -171,8 +182,11 @@ def _calibrate_csho_sigma(model, train_loader, N: int, gamma_self: float, gamma_
                            args: argparse.Namespace, device) -> float:
     batch = next(iter(train_loader))
     conditioning = batch["conditioning"].to(device)
+    if "elliptic_params" in batch:
+        batch["elliptic_params"] = batch["elliptic_params"].to(device)
     with torch.no_grad():
-        X, _, _, _, _ = model.encode(conditioning, k_reference=args.k_reference)
+        model_conditioning = _model_input_conditioning(args, batch, conditioning)
+        X, _, _, _, _ = model.encode(model_conditioning, k_reference=args.k_reference)
     X_flat = torch.cat([X[i][0].reshape(-1, 1) for i in range(N)], dim=-1).detach().cpu()
     cov_data = torch.cov(X_flat.T)
     return calibrate_sigma_for_leak(
@@ -246,8 +260,11 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
     for _epoch in range(args.n_epochs):
         for batch in train_loader:
             conditioning = batch["conditioning"].to(device)
+            if "elliptic_params" in batch:
+                batch["elliptic_params"] = batch["elliptic_params"].to(device)
             targets = [t.to(device) for t in batch["tasks"]]
-            X, K_self, K_global, feat, y0 = model.encode(conditioning, k_reference=args.k_reference)
+            model_conditioning = _model_input_conditioning(args, batch, conditioning)
+            X, K_self, K_global, feat, y0 = model.encode(model_conditioning, k_reference=args.k_reference)
 
             init_loss = torch.zeros((), device=device)
             for name, y0_t, target in zip(task_names, [y0[n] for n in task_names], targets):
@@ -332,8 +349,11 @@ def evaluate(args, model, score_net, val_loader, device, task_names, state, gamm
 
     for batch in val_loader:
         conditioning = batch["conditioning"].to(device)
+        if "elliptic_params" in batch:
+            batch["elliptic_params"] = batch["elliptic_params"].to(device)
         targets = [t.to(device) for t in batch["tasks"]]
-        X, K_self, K_global, feat, _ = model.encode(conditioning, k_reference=args.k_reference)
+        model_conditioning = _model_input_conditioning(args, batch, conditioning)
+        X, K_self, K_global, feat, _ = model.encode(model_conditioning, k_reference=args.k_reference)
 
         if is_csho:
             cfg, coupling, g_per_task, sigma = state["cfg"], state["coupling"], state["g_per_task"], state["sigma"]
