@@ -14,11 +14,13 @@ from core.baselines import (
     ddpm_forward_n, ddpm_reverse_step_n, make_ddpm_schedule, vp_beta_t, vp_sde_drift_n, vp_sde_reverse_step_n,
 )
 from core.coupling import build_coupling_matrix
-from core.damping import calibrate_gammas_for_regime
 from core.diagnostics_bridge import attach_grad_hooks_generic, grad_norm_buckets, make_drift_detector
 from core.reporting import plot_bar_comparison, render_experiment_report, write_csv, write_json
-from core.sde import build_g_matrix_n, em_step_n, ndsm_loss_n, reverse_step_n
+from core.sde import build_g_matrix_n
 from core.stats import aggregate_over_seeds
+from synthetic.anderson_sde import anderson_em_step_coupled_gamma, anderson_reverse_step_coupled_gamma
+from synthetic.drift_coupled_gamma import calibrate_coupled_gammas
+from synthetic.exact_dsm import calibrate_sigma_for_leak, precompute_transition_params, sample_and_tikhonov_score_target
 from pde.dataset import ALL_PROBLEMS, MultiPhysicsFieldDataset, collate_fn
 from pde.model import (
     FlatScoreNetwork, MultiPhysicsScoreNetwork, PhysicsModel, make_flat_score_fn, make_score_fn,
@@ -69,8 +71,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--target-zeta", type=float, default=None)
     p.add_argument("--alpha", default="1.0")
     p.add_argument("--beta", default="0.5")
-    p.add_argument("--sigma", type=float, default=0.1)
-    p.add_argument("--k-reference", type=float, default=1.0)
+    p.add_argument("--leak-fraction", type=float, default=0.01,
+                    help="target correlation-leak fraction for CSHO's exact matrix-recursion sigma calibration "
+                         "(synthetic/exact_dsm.py::calibrate_sigma_for_leak); replaces the old flat --sigma")
+    p.add_argument("--lam", type=float, default=0.1, help="Tikhonov regularization strength for the DSM score target")
+    p.add_argument("--k-reference", type=float, default=1.0,
+                    help="fixed confinement/coupling stiffness ensuring critical damping -- NOT learned from data "
+                         "(see PhysicsModel.encode's k_reference arg); this is what makes the exact closed-form "
+                         "transition kernel valid, the same role K_REFERENCE plays in synthetic/")
     p.add_argument("--constant-k", action="store_true")
     p.add_argument("--n-diff-steps", type=int, default=2)
     p.add_argument("--dt", type=float, default=0.5)
@@ -85,7 +93,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--n-downsample", type=int, default=3)
     p.add_argument("--score-blocks", type=int, default=3)
     p.add_argument("--score-heads", type=int, default=4)
-    p.add_argument("--lambda-ndsm", type=float, default=1.0)
+    p.add_argument("--lambda-tikhonov", type=float, default=1.0)
     p.add_argument("--explode-threshold", type=float, default=1e3)
     p.add_argument("--max-hook-modules", type=int, default=200)
     p.add_argument("--max-samples", type=int, default=None)
@@ -113,14 +121,14 @@ def parse_args(argv=None) -> argparse.Namespace:
     return args
 
 
-def build_method_state(args, N: int, device):
+def build_method_state(args, N: int, device, sigma: float = None):
     if args.method in METHOD_CONFIGS:
         cfg = METHOD_CONFIGS[args.method]
         coupling = build_coupling_matrix(N, mode=cfg["coupling_mode"], device=device)
         g_per_task = None
         if cfg["diffusion_mode"] == "independent":
-            g_per_task = [args.sigma * (0.8 + 0.4 * i / max(N - 1, 1)) for i in range(N)]
-        return {"is_csho": True, "cfg": cfg, "coupling": coupling, "g_per_task": g_per_task, "ddpm_sched": None}
+            g_per_task = [sigma * (0.8 + 0.4 * i / max(N - 1, 1)) for i in range(N)]
+        return {"is_csho": True, "cfg": cfg, "coupling": coupling, "g_per_task": g_per_task, "ddpm_sched": None, "sigma": sigma}
     if args.method == "ddpm":
         return {"is_csho": False, "cfg": None, "coupling": None, "g_per_task": None,
                 "ddpm_sched": make_ddpm_schedule(args.n_diff_steps, device=device)}
@@ -158,6 +166,20 @@ def make_dataset(args, split: str) -> MultiPhysicsFieldDataset:
     )
 
 
+def _calibrate_csho_sigma(model, train_loader, N: int, gamma_self: float, gamma_couple: float,
+                           args: argparse.Namespace, device) -> float:
+    batch = next(iter(train_loader))
+    conditioning = batch["conditioning"].to(device)
+    with torch.no_grad():
+        X, _, _, _, _ = model.encode(conditioning, k_reference=args.k_reference)
+    X_flat = torch.cat([X[i][0].reshape(-1, 1) for i in range(N)], dim=-1).detach().cpu()
+    cov_data = torch.cov(X_flat.T)
+    return calibrate_sigma_for_leak(
+        N, gamma_self, gamma_couple, args.alpha_list, args.k_reference, cov_data,
+        args.n_diff_steps, args.dt, None, leak_fraction=args.leak_fraction,
+    )
+
+
 def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
     torch.manual_seed(seed)
     device = torch.device(args.device)
@@ -183,8 +205,7 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
                           latent_dim=args.latent_dim, backbone_ch=args.backbone_channels,
                           base_ch=args.base_channels, n_downsample=args.n_downsample).to(device)
 
-    state = build_method_state(args, N, device)
-    is_csho = state["is_csho"]
+    is_csho = args.method in METHOD_CONFIGS
     if is_csho:
         score_net = MultiPhysicsScoreNetwork(N, args.latent_dim, model.backbone.out_ch,
                                               n_blocks=args.score_blocks, n_heads=args.score_heads).to(device)
@@ -194,7 +215,25 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
 
     optimizer = torch.optim.Adam(list(model.parameters()) + list(score_net.parameters()), lr=args.lr)
 
-    gamma = calibrate_gammas_for_regime(args.alpha_list, [args.k_reference] * N, args.damping_regime, args.target_zeta)
+    gamma_self, gamma_couple = calibrate_coupled_gammas(
+        args.alpha_list[0], args.beta_list[0], args.k_reference, args.k_reference, N,
+        regime=args.damping_regime, target_zeta=args.target_zeta,
+    )
+
+    if is_csho:
+        sigma = _calibrate_csho_sigma(model, train_loader, N, gamma_self, gamma_couple, args, device)
+        state = build_method_state(args, N, device, sigma=sigma)
+        coupling = state["coupling"]
+        params = precompute_transition_params(
+            N, gamma_self, gamma_couple, args.alpha_list, args.beta_list, args.k_reference, coupling,
+            args.n_diff_steps, args.dt, lambda t, T: build_g_matrix_n(
+                torch.tensor(sigma, device=device), N, diffusion_mode=state["cfg"]["diffusion_mode"],
+                g_per_task=state["g_per_task"], coupling_matrix=coupling if state["cfg"]["diffusion_mode"] == "independent" else None,
+            ), args.constant_k, None,
+        )
+    else:
+        state = build_method_state(args, N, device)
+
     drift_detector = make_drift_detector(bucket_names=[])
     attach_grad_hooks_generic(model, max_modules=args.max_hook_modules)
     attach_grad_hooks_generic(score_net, max_modules=args.max_hook_modules)
@@ -207,7 +246,7 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
         for batch in train_loader:
             conditioning = batch["conditioning"].to(device)
             targets = [t.to(device) for t in batch["tasks"]]
-            X, K_self, K_global, feat, y0 = model.encode(conditioning)
+            X, K_self, K_global, feat, y0 = model.encode(conditioning, k_reference=args.k_reference)
 
             init_loss = torch.zeros((), device=device)
             for name, y0_t, target in zip(task_names, [y0[n] for n in task_names], targets):
@@ -216,23 +255,27 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
             t_idx = torch.randint(1, args.n_diff_steps + 1, (1,)).item()
 
             if is_csho:
-                cfg, coupling, g_per_task = state["cfg"], state["coupling"], state["g_per_task"]
-                V = [[torch.zeros_like(x[0])] for x in X]
-                G = build_g_matrix_n(torch.tensor(args.sigma, device=device), N, diffusion_mode=cfg["diffusion_mode"],
-                                      g_per_task=g_per_task, coupling_matrix=coupling if cfg["diffusion_mode"] == "independent" else None)
-                X_next, V_next, mu, z_list, sigma_list = em_step_n(
-                    X, V, K_self, K_global, t_idx, args.n_diff_steps, alpha=args.alpha_list, beta=args.beta_list, gamma=gamma,
-                    coupling_matrix_drift=coupling, use_gamma=True, constant_k=args.constant_k, dt=args.dt, G=G,
-                )
+                B, latent_dim = X[0][0].shape
+                X_flat = torch.cat([X[i][0].reshape(-1, 1) for i in range(N)], dim=-1)
+                Z0 = torch.cat([X_flat, torch.zeros_like(X_flat)], dim=-1)
+                Phi_t, Sigma_t = params[t_idx - 1]
+                Zt, score_target = sample_and_tikhonov_score_target(Z0, Phi_t, Sigma_t, N, args.lam)
+                X_t = [[Zt[:, i:i + 1].reshape(B, latent_dim)] for i in range(N)]
+                V_t = [[Zt[:, N + i:N + i + 1].reshape(B, latent_dim)] for i in range(N)]
+
                 score_fn = make_score_fn(score_net, feat)
-                ndsm = ndsm_loss_n(X, score_fn, V_next, mu, z_list, sigma_list, t_n=t_idx)
+                score_pred = score_fn(X_t, V_t, t_idx)
+                tikhonov = torch.zeros((), device=device)
+                for i in range(N):
+                    target_i = score_target[:, i:i + 1].reshape(B, latent_dim)
+                    tikhonov = tikhonov + F.mse_loss(score_pred[i][0], target_i)
 
                 readout_loss = torch.zeros((), device=device)
                 for name, x, target in zip(task_names, X, targets):
                     pred = model.decode(name, x[0])
                     readout_loss = readout_loss + F.l1_loss(pred, target)
 
-                loss = init_loss + readout_loss + args.lambda_ndsm * ndsm
+                loss = init_loss + readout_loss + args.lambda_tikhonov * tikhonov
             else:
                 X0_flat = [x[0] for x in X]
                 flat_fn = make_flat_score_fn(score_net, feat)
@@ -251,7 +294,7 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
                     pred = model.decode(name, x[0])
                     readout_loss = readout_loss + F.l1_loss(pred, target)
 
-                loss = init_loss + readout_loss + args.lambda_ndsm * diffusion_loss
+                loss = init_loss + readout_loss + args.lambda_tikhonov * diffusion_loss
 
             optimizer.zero_grad()
             loss.backward()
@@ -268,7 +311,7 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
                 nan_events += 1
             n_steps += 1
 
-    metrics = evaluate(args, model, score_net, val_loader, device, task_names, state, gamma)
+    metrics = evaluate(args, model, score_net, val_loader, device, task_names, state, gamma_self, gamma_couple)
     metrics["nan_events"] = float(nan_events)
     metrics["explosion_events"] = float(explosion_events)
     metrics["n_train_steps"] = float(n_steps)
@@ -276,7 +319,7 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
 
 
 @torch.no_grad()
-def evaluate(args, model, score_net, val_loader, device, task_names, state, gamma) -> Dict[str, float]:
+def evaluate(args, model, score_net, val_loader, device, task_names, state, gamma_self, gamma_couple) -> Dict[str, float]:
     model.eval()
     score_net.eval()
     is_csho = state["is_csho"]
@@ -289,21 +332,21 @@ def evaluate(args, model, score_net, val_loader, device, task_names, state, gamm
     for batch in val_loader:
         conditioning = batch["conditioning"].to(device)
         targets = [t.to(device) for t in batch["tasks"]]
-        X, K_self, K_global, feat, _ = model.encode(conditioning)
+        X, K_self, K_global, feat, _ = model.encode(conditioning, k_reference=args.k_reference)
 
         if is_csho:
-            cfg, coupling, g_per_task = state["cfg"], state["coupling"], state["g_per_task"]
+            cfg, coupling, g_per_task, sigma = state["cfg"], state["coupling"], state["g_per_task"], state["sigma"]
             V = [[torch.zeros_like(x[0])] for x in X]
             X_cur, V_cur = X, V
-            G = build_g_matrix_n(torch.tensor(args.sigma, device=device), N, diffusion_mode=cfg["diffusion_mode"],
+            G = build_g_matrix_n(torch.tensor(sigma, device=device), N, diffusion_mode=cfg["diffusion_mode"],
                                   g_per_task=g_per_task, coupling_matrix=coupling if cfg["diffusion_mode"] == "independent" else None)
             score_fn = make_score_fn(score_net, feat)
             for t_idx in reversed(range(1, args.n_diff_steps + 1)):
                 score_outputs = score_fn(X_cur, V_cur, t_idx)
-                X_cur, V_cur = reverse_step_n(
+                X_cur, V_cur = anderson_reverse_step_coupled_gamma(
                     X_cur, V_cur, K_self, K_global, score_outputs, t_idx, args.n_diff_steps,
-                    alpha=args.alpha_list, beta=args.beta_list, gamma=gamma,
-                    coupling_matrix_drift=coupling, use_gamma=True, constant_k=args.constant_k, dt=args.dt, G=G,
+                    args.alpha_list, args.beta_list, gamma_self, gamma_couple,
+                    coupling, args.constant_k, args.dt, G,
                 )
             final_latents = [X_cur[i][0] for i in range(N)]
         elif args.method == "ddpm":

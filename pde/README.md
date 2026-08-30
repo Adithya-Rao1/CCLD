@@ -139,6 +139,33 @@ Six sweep axes:
 fixed problem for every axis except `problem`) can be overridden if you want the other axes to
 run against a different problem.
 
+## 7. SDE machinery and a known open limitation
+
+CSHO's SDE machinery here now matches `synthetic/`'s finalized version: `K_self`/`K_global`
+(confinement/coupling stiffness) are fixed constants (`--k-reference`), not learned from data --
+this is what makes the exact closed-form transition kernel valid, the same role `K_REFERENCE`
+plays in `synthetic/`. Concretely: mode-decoupled critical damping
+(`synthetic.drift_coupled_gamma.calibrate_coupled_gammas`, symmetric/antisymmetric
+`gamma_self`/`gamma_couple`), the Anderson-corrected reverse SDE
+(`synthetic.anderson_sde.anderson_em_step_coupled_gamma`/`anderson_reverse_step_coupled_gamma`),
+Tikhonov-regularized DSM (`synthetic.exact_dsm.sample_and_tikhonov_score_target`, `--lam`) in
+place of the old `ndsm_loss_n`, and exact matrix-recursion noise calibration
+(`synthetic.exact_dsm.calibrate_sigma_for_leak`, `--leak-fraction`) in place of the old flat
+`--sigma`.
+
+**Known open limitation:** the calibration's `sigma_x,true^2` and `rho_true` (the empirical
+per-field variance and mean pairwise field correlation the leak formula needs) are estimated via
+`torch.cov` from one batch of real data encoded through `PhysicsBackbone`/`FieldHead` **at model
+initialization, before any training** -- not recomputed as the jointly-trained encoder's latent
+distribution shifts over the course of training. This is analogous to a one-time
+initialization-scale choice (e.g. Xavier/He init) rather than a moving recalibration, and hasn't
+been tested to see whether it actually matters. **Come back and check**: run a real experiment,
+then compare the calibrated `sigma` value (and the resulting KL/rel_l2 metrics) against a version
+recalibrated from a late-training/converged encoder snapshot instead of the initial one -- if
+they're close, the simplification is fine as-is; if the encoder's output scale drifts
+significantly during training, this may need periodic recalibration (e.g. once per epoch) rather
+than the current once-per-run calibration.
+
 ## Important notes
 
 - `Elder`'s 10-timestep rollout is loaded as 30 extra output channels (3 fields x 10 steps)

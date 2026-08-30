@@ -44,7 +44,6 @@ class FieldHead(nn.Module):
         self.trunk = nn.Sequential(ConvBlock(in_ch, base_ch), ConvBlock(base_ch, base_ch))
         self.y0_head = nn.Conv2d(base_ch, out_ch, 1)
         self.to_latent = nn.Linear(base_ch, latent_dim)
-        self.to_cond = nn.Linear(base_ch, latent_dim)
 
         readout_ch = max(latent_dim // 4, out_ch)
         self.readout_seed_hw = (out_hw[0] // 8, out_hw[1] // 8)
@@ -55,13 +54,12 @@ class FieldHead(nn.Module):
         self.readout_ch = readout_ch
         self.readout_out = nn.Conv2d(readout_ch, out_ch, 1)
 
-    def encode(self, shared_feat: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def encode(self, shared_feat: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         feat = self.trunk(shared_feat)
         pooled = feat.mean(dim=(-2, -1))
         latent = self.to_latent(pooled)
-        cond = self.to_cond(pooled)
         y0 = F.interpolate(self.y0_head(feat), size=self.out_hw, mode="bilinear", align_corners=False)
-        return latent, cond, y0
+        return latent, y0
 
     def decode(self, latent: torch.Tensor) -> torch.Tensor:
         B = latent.shape[0]
@@ -176,14 +174,16 @@ class PhysicsModel(nn.Module):
             for name in self.task_names
         })
 
-    def encode(self, conditioning: torch.Tensor):
+    def encode(self, conditioning: torch.Tensor, k_reference: float = 1.0):
         feat, global_cond = self.backbone(conditioning)
+        B = conditioning.shape[0]
+        k_const = torch.full((B, 1), k_reference, device=conditioning.device, dtype=conditioning.dtype)
         X, K_self, K_global, y0 = [], [], [], {}
         for name in self.task_names:
-            latent, cond, y0_t = self.heads[name].encode(feat)
+            latent, y0_t = self.heads[name].encode(feat)
             X.append([latent])
-            K_self.append([cond])
-            K_global.append(global_cond)
+            K_self.append([k_const])
+            K_global.append(k_const)
             y0[name] = y0_t
         return X, K_self, K_global, global_cond, y0
 
