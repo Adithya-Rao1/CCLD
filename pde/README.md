@@ -296,39 +296,61 @@ authoritative):
 
 ## 9. Score-network architecture ablation (`--score-arch`)
 
-`--score-arch {attention, fno}` (default `attention`) selects the network that predicts scores
-during CSHO/DDPM/SDM training and sampling, for `TE_heat`, `E_flow`, `VA`. `attention` is the
-original, unchanged pipeline (`pde/model.py::PhysicsModel`/`MultiPhysicsScoreNetwork` -- a pooled
-per-task latent vector `(B, latent_dim)`, refined via cross-field attention). `fno` is new:
-**native-pixel diffusion** -- each task's diffused state is the full field itself, `(B, 1, H, W)`,
-with no latent-vector bottleneck, denoised by an FNO (`pde/fno_score_net.py`, needs
-`neuraloperator`: `pip install neuraloperator`).
+`--score-arch {attention, fno, songunet}` (default `attention`) selects the network that predicts
+scores during CSHO/DDPM/SDM training and sampling, for `TE_heat`, `E_flow`, `VA`. `attention` is
+the original, unchanged pipeline (`pde/model.py::PhysicsModel`/`MultiPhysicsScoreNetwork` -- a
+pooled per-task latent vector `(B, latent_dim)`, refined via cross-field attention). `fno` and
+`songunet` are new, and share the same **native-pixel diffusion** state representation: each
+task's diffused state is the full field itself, `(B, 1, H, W)`, with no latent-vector bottleneck.
+`fno` denoises with an FNO (`pde/fno_score_net.py`, needs `neuraloperator`:
+`pip install neuraloperator`); `songunet` denoises with DiffusionPDE's `SongUNet`
+(`pde/songunet_score_net.py`, reused directly from the vendored
+`pde/multiphysics-bench/DiffusionPDE` clone -- no extra dependency, `dnnlib`/`torch_utils` ship
+with that clone).
 
 ```
 python -m pde.run_experiment \
   --config pde/config.yaml --data-root /data/multiphysics --problem TE_heat \
   --method csho --score-arch fno --seeds 0,1,2,3,4 \
   --out-dir results/experiment_2_physics/TE_heat_csho_fno
+
+python -m pde.run_experiment \
+  --config pde/config.yaml --data-root /data/multiphysics --problem TE_heat \
+  --method csho --score-arch songunet --seeds 0,1,2,3,4 \
+  --out-dir results/experiment_2_physics/TE_heat_csho_songunet
 ```
 
 `--fno-modes` (default `"12,12"`), `--fno-hidden-channels` (default 128), `--fno-init-channels`
-(default 32) tune the FNO; `n_modes` must not exceed the working resolution (`--image-size`).
+(default 32, shared by `fno`/`songunet` -- see below) tune the FNO; `n_modes` must not exceed the
+working resolution (`--image-size`). `--songunet-model-channels` (default 32),
+`--songunet-channel-mult` (default `"1,2,2"`), `--songunet-num-blocks` (default 2),
+`--songunet-attn-resolutions` (default `"16"`, comma-separated, empty string for none) tune
+SongUNet -- `channel_mult`'s length is the number of downsampling stages, so it must stay small
+enough that `--image-size` doesn't collapse to 0 (e.g. 3 entries needs `--image-size >= 8`).
 
-**Why `fno` needed real architecture changes, not just a network swap.** Read through
+**Why `fno`/`songunet` needed real architecture changes, not just a network swap.** Read through
 `pde/model.py`/`pde/run_experiment.py` before starting this phase and found the `attention` path
 doesn't do textbook noise-to-data generative sampling: `PhysicsModel.encode(conditioning)`
 produces a *deterministic* per-task starting point (no randomness), and the reverse SDE
 (`--n-diff-steps` defaults to 2) is a short, learned refinement of it. More importantly,
 `MultiPhysicsScoreNetwork.forward` never sees the position state `X` at all -- only the velocity
 `V` (`make_score_fn`'s closure silently drops the `X` argument every caller already supplies). This
-was a placeholder limitation, not a design choice to preserve, so `fno`'s score network(s) fix it
-by construction: `pde/fno_score_net.py::FNOScoreNetwork` conditions on **both** `X` and `V` (plus
-the raw conditioning field and timestep) at every step, matching proper
-critically-damped-Langevin-style scoring (`score(x_t, v_t, t)`, not `score(v_t, t)`). The
-`attention` path / `MultiPhysicsScoreNetwork` is left exactly as-is (superseded for CSHO methods
-under `fno`, not patched in place) -- zero risk to already-produced `attention`-path results.
+was a placeholder limitation, not a design choice to preserve, so both new score networks fix it
+by construction: `pde/fno_score_net.py::FNOScoreNetwork` and
+`pde/songunet_score_net.py::SongUNetScoreNetwork` condition on **both** `X` and `V` (plus the raw
+conditioning field and timestep) at every step, matching proper critically-damped-Langevin-style
+scoring (`score(x_t, v_t, t)`, not `score(v_t, t)`). `songunet` conditions on `X`/`V`/conditioning
+via channel-concatenation into the network's input, and on the timestep via `SongUNet`'s own native
+`noise_labels` embedding pathway (unlike `fno`, which has no native time-conditioning mechanism and
+uses a broadcast time channel instead). `SongUNet`'s own EDM preconditioning wrappers
+(`VPPrecond`/`VEPrecond`/`EDMPrecond`) are deliberately bypassed -- this repo already has its own
+SDE/preconditioning machinery (`synthetic/exact_dsm.py`); the raw network is called directly
+(`label_dim=0`, unconditional in `SongUNet`'s own terms) and its output is interpreted as a
+velocity-score prediction, exactly like `FNOScoreNetwork`'s output. The `attention` path /
+`MultiPhysicsScoreNetwork` is left exactly as-is (superseded for CSHO methods under `fno`/
+`songunet`, not patched in place) -- zero risk to already-produced `attention`-path results.
 
-**What changed, concretely, for `fno`:**
+**What changed, concretely, for `fno`/`songunet`:**
 - `pde/model.py::SpatialFieldModel` replaces `PhysicsModel` for this path: `PhysicsBackbone` is
   reused unchanged, but `FieldHead`'s vector round-trip (`to_latent`/`readout_proj`/
   `readout_conv`/`readout_out`) is dropped entirely. A lightweight per-task CNN head (structurally

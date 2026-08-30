@@ -348,6 +348,144 @@ def test_experiment_2_physics_smoke_va_fno():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+_SONGUNET_ARGS = [
+    "--score-arch", "songunet", "--songunet-model-channels", "8", "--songunet-channel-mult", "1,2",
+    "--songunet-num-blocks", "1", "--songunet-attn-resolutions", "", "--fno-init-channels", "8",
+    "--base-channels", "8", "--n-downsample", "1",
+]
+
+
+def test_experiment_2_physics_smoke_e_flow_songunet():
+    # Exercises the native-pixel-diffusion SongUNet score-network path (--score-arch songunet,
+    # pde/songunet_score_net.py::SongUNetScoreNetwork -- the raw DiffusionPDE SongUNet, reused
+    # directly from the vendored clone, called without its own EDM preconditioning wrappers).
+    import scipy.io as sio
+
+    from pde.run_experiment import parse_args, train_one_seed
+
+    tmp = tempfile.mkdtemp(prefix="csho_smoke_exp2_eflow_songunet_")
+    try:
+        rng = np.random.default_rng(0)
+        problem_root = os.path.join(tmp, "training", "E_flow")
+        for field in ["kappa", "ec_V", "u_flow", "v_flow"]:
+            field_dir = os.path.join(problem_root, field)
+            os.makedirs(field_dir, exist_ok=True)
+            for sid in ["1", "2", "3", "4"]:
+                sio.savemat(os.path.join(field_dir, f"{sid}.mat"), {field: rng.random((16, 16))})
+
+        argv = [
+            "--data-root", tmp, "--problem", "E_flow", "--method", "csho", "--n-diff-steps", "2",
+            "--batch-size", "2", "--n-epochs", "1", "--seeds", "0", "--max-samples", "10", "--image-size", "16",
+            *_SONGUNET_ARGS, "--num-workers", "0", "--device", "cpu", "--out-dir", os.path.join(tmp, "out"),
+        ]
+        args = parse_args(argv)
+        metrics = train_one_seed(args, seed=0)
+        assert all(np.isfinite(v) for v in metrics.values()), metrics
+        assert "flow_continuity_pde_residual" in metrics and "current_continuity_pde_residual" in metrics, metrics
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_experiment_2_physics_smoke_e_flow_songunet_ddpm():
+    # Exercises the songunet path's baseline (non-CSHO) branch, FlatSongUNetScoreNetwork.
+    import scipy.io as sio
+
+    from pde.run_experiment import parse_args, train_one_seed
+
+    tmp = tempfile.mkdtemp(prefix="csho_smoke_exp2_eflow_songunet_ddpm_")
+    try:
+        rng = np.random.default_rng(0)
+        problem_root = os.path.join(tmp, "training", "E_flow")
+        for field in ["kappa", "ec_V", "u_flow", "v_flow"]:
+            field_dir = os.path.join(problem_root, field)
+            os.makedirs(field_dir, exist_ok=True)
+            for sid in ["1", "2", "3", "4"]:
+                sio.savemat(os.path.join(field_dir, f"{sid}.mat"), {field: rng.random((16, 16))})
+
+        argv = [
+            "--data-root", tmp, "--problem", "E_flow", "--method", "ddpm", "--n-diff-steps", "2",
+            "--batch-size", "2", "--n-epochs", "1", "--seeds", "0", "--max-samples", "10", "--image-size", "16",
+            *_SONGUNET_ARGS, "--num-workers", "0", "--device", "cpu", "--out-dir", os.path.join(tmp, "out"),
+        ]
+        args = parse_args(argv)
+        metrics = train_one_seed(args, seed=0)
+        assert all(np.isfinite(v) for v in metrics.values()), metrics
+        assert "flow_continuity_pde_residual" in metrics and "current_continuity_pde_residual" in metrics, metrics
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_experiment_2_physics_smoke_te_heat_songunet():
+    import scipy.io as sio
+
+    from pde.run_experiment import parse_args, train_one_seed
+
+    tmp = tempfile.mkdtemp(prefix="csho_smoke_exp2_teheat_songunet_")
+    try:
+        rng = np.random.default_rng(0)
+        problem_root = os.path.join(tmp, "training", "TE_heat")
+        mater_dir = os.path.join(problem_root, "mater")
+        os.makedirs(mater_dir, exist_ok=True)
+        T_dir = os.path.join(problem_root, "T")
+        os.makedirs(T_dir, exist_ok=True)
+        Ez_dir = os.path.join(problem_root, "Ez")
+        os.makedirs(Ez_dir, exist_ok=True)
+        elliptic_dir = os.path.join(problem_root, "ellipticcsv")
+        os.makedirs(elliptic_dir, exist_ok=True)
+        for sid in ["1", "2", "3", "4"]:
+            sio.savemat(os.path.join(mater_dir, f"{sid}.mat"), {"mater": rng.random((16, 16)) + 1.0})
+            sio.savemat(os.path.join(T_dir, f"{sid}.mat"), {"T": rng.random((16, 16)) * 50 + 300})
+            arr = rng.random((16, 16)) + 1j * rng.random((16, 16))
+            sio.savemat(os.path.join(Ez_dir, f"{sid}.mat"), {"Ez": arr})
+            np.savetxt(os.path.join(elliptic_dir, f"{sid}.csv"), np.array([[4.0, 3.0, 30.0]]), delimiter=",")
+
+        argv = [
+            "--data-root", tmp, "--problem", "TE_heat", "--method", "csho", "--n-diff-steps", "2",
+            "--batch-size", "2", "--n-epochs", "1", "--seeds", "0", "--max-samples", "10", "--image-size", "16",
+            *_SONGUNET_ARGS, "--num-workers", "0", "--device", "cpu", "--out-dir", os.path.join(tmp, "out"),
+        ]
+        args = parse_args(argv)
+        metrics = train_one_seed(args, seed=0)
+        assert all(np.isfinite(v) for v in metrics.values()), metrics
+        assert "e_field_pde_residual" in metrics and "heat_pde_residual" in metrics, metrics
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_experiment_2_physics_smoke_va_songunet():
+    import scipy.io as sio
+
+    from pde.run_experiment import parse_args, train_one_seed
+
+    tmp = tempfile.mkdtemp(prefix="csho_smoke_exp2_va_songunet_")
+    try:
+        rng = np.random.default_rng(0)
+        problem_root = os.path.join(tmp, "training", "VA")
+        rho_dir = os.path.join(problem_root, "rho_water")
+        os.makedirs(rho_dir, exist_ok=True)
+        for sid in ["1", "2", "3", "4"]:
+            sio.savemat(os.path.join(rho_dir, f"{sid}.mat"), {"rho_water": rng.random((16, 16)) + 500.0})
+        for field in ["p_t", "Sxx", "Sxy", "Syy", "x_u", "x_v"]:
+            field_dir = os.path.join(problem_root, field)
+            os.makedirs(field_dir, exist_ok=True)
+            for sid in ["1", "2", "3", "4"]:
+                arr = rng.random((16, 16)) + 1j * rng.random((16, 16))
+                sio.savemat(os.path.join(field_dir, f"{sid}.mat"), {field: arr})
+
+        argv = [
+            "--data-root", tmp, "--problem", "VA", "--method", "csho", "--n-diff-steps", "2",
+            "--batch-size", "2", "--n-epochs", "1", "--seeds", "0", "--max-samples", "10", "--image-size", "16",
+            *_SONGUNET_ARGS, "--num-workers", "0", "--device", "cpu", "--out-dir", os.path.join(tmp, "out"),
+        ]
+        args = parse_args(argv)
+        metrics = train_one_seed(args, seed=0)
+        assert all(np.isfinite(v) for v in metrics.values()), metrics
+        for eq in ["acoustic_real", "acoustic_imag", "structure_x_real", "structure_x_imag", "structure_y_real", "structure_y_imag"]:
+            assert f"{eq}_pde_residual" in metrics, metrics
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_experiment_3_synthetic_smoke():
     from synthetic.run_experiment import parse_args, train_one_seed
 
@@ -384,6 +522,14 @@ if __name__ == "__main__":
     print("OK: experiment_2_physics (TE_heat, score-arch=fno, csho) smoke test passed.")
     test_experiment_2_physics_smoke_va_fno()
     print("OK: experiment_2_physics (VA, score-arch=fno, csho) smoke test passed.")
+    test_experiment_2_physics_smoke_e_flow_songunet()
+    print("OK: experiment_2_physics (E_flow, score-arch=songunet, csho) smoke test passed.")
+    test_experiment_2_physics_smoke_e_flow_songunet_ddpm()
+    print("OK: experiment_2_physics (E_flow, score-arch=songunet, ddpm) smoke test passed.")
+    test_experiment_2_physics_smoke_te_heat_songunet()
+    print("OK: experiment_2_physics (TE_heat, score-arch=songunet, csho) smoke test passed.")
+    test_experiment_2_physics_smoke_va_songunet()
+    print("OK: experiment_2_physics (VA, score-arch=songunet, csho) smoke test passed.")
     test_experiment_3_synthetic_smoke()
     print("OK: experiment_3_synthetic smoke test passed.")
     print("ALL EXPERIMENT SMOKE TESTS PASSED.")
