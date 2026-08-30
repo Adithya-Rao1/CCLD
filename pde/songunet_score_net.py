@@ -1,17 +1,12 @@
 from __future__ import annotations
 
-import os
-import sys
 from typing import List
 
 import torch
 import torch.nn as nn
 
-_DIFFUSION_PDE_ROOT = os.path.join(os.path.dirname(__file__), "multiphysics-bench", "DiffusionPDE")
-if _DIFFUSION_PDE_ROOT not in sys.path:
-    sys.path.append(_DIFFUSION_PDE_ROOT)
+from pde.vendored_songunet import SongUNet
 
-from training.networks import SongUNet  # noqa: E402
 
 def _parse_channel_mult(s) -> List[int]:
     if isinstance(s, (list, tuple)):

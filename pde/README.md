@@ -304,9 +304,21 @@ pooled per-task latent vector `(B, latent_dim)`, refined via cross-field attenti
 task's diffused state is the full field itself, `(B, 1, H, W)`, with no latent-vector bottleneck.
 `fno` denoises with an FNO (`pde/fno_score_net.py`, needs `neuraloperator`:
 `pip install neuraloperator`); `songunet` denoises with DiffusionPDE's `SongUNet`
-(`pde/songunet_score_net.py`, reused directly from the vendored
-`pde/multiphysics-bench/DiffusionPDE` clone -- no extra dependency, `dnnlib`/`torch_utils` ship
-with that clone).
+(`pde/songunet_score_net.py`, using `pde/vendored_songunet.py` -- no extra dependency).
+
+`pde/vendored_songunet.py` is a **plain copy** of `SongUNet` and its dependencies
+(`UNetBlock`, `AttentionOp`, `PositionalEmbedding`, `FourierEmbedding`, etc.) from
+`pde/multiphysics-bench/DiffusionPDE/training/networks.py`, with the `@persistence.persistent_class`
+decorators dropped (a `torch_utils`/`dnnlib`-dependent pickle-portability mechanism for
+DiffusionPDE's own checkpoint format, never used here). **Not imported from the clone directly**
+at runtime, because `pde/multiphysics-bench` is a nested git repo the outer CoupledSHO repo only
+tracks as a gitlink (`git ls-tree` shows mode `160000`, no `.gitmodules`) -- a plain
+`git clone`/`git pull` of this repo does not bring that nested repo's file content along, which
+broke `--score-arch songunet` with `ModuleNotFoundError: No module named 'training'` on a fresh
+remote checkout. Vendoring the specific classes actually needed as tracked files sidesteps this
+entirely; `pde/multiphysics-bench` is still cloned locally for reference/verification (e.g.
+`pde_residuals.py`'s residual formulas were checked against its PINN loss functions) but nothing
+in this repo depends on its presence at runtime anymore.
 
 ```
 python -m pde.run_experiment \
