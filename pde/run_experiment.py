@@ -22,6 +22,7 @@ from synthetic.anderson_sde import anderson_em_step_coupled_gamma, anderson_reve
 from synthetic.drift_coupled_gamma import calibrate_coupled_gammas
 from synthetic.exact_dsm import calibrate_sigma_for_leak, precompute_transition_params, sample_and_tikhonov_score_target
 from pde.dataset import ALL_PROBLEMS, MultiPhysicsFieldDataset, collate_fn
+from pde.pde_residuals import e_flow_residual, pde_residual_metric, te_heat_residual, va_residual
 from pde.model import (
     FlatScoreNetwork, MultiPhysicsScoreNetwork, PhysicsModel, make_flat_score_fn, make_score_fn,
 )
@@ -381,6 +382,33 @@ def evaluate(args, model, score_net, val_loader, device, task_names, state, gamm
             spec = spectral_l2_error(pred, target)
             for k, v in ((f"{name}_rel_l2", rel), (f"{name}_spectral_l2", spec)):
                 sums[k] = sums.get(k, 0.0) + v
+                counts[k] = counts.get(k, 0) + 1
+
+        if args.problem in ("TE_heat", "E_flow", "VA"):
+            pred_by_name = dict(zip(task_names, [p.squeeze(1) for p in preds]))
+            if args.problem == "TE_heat":
+                residuals = te_heat_residual({
+                    "mater": conditioning[:, 0], "T": pred_by_name["T"],
+                    "Ez_re": pred_by_name["Re{Ez}"], "Ez_im": pred_by_name["Im{Ez}"],
+                }, batch["elliptic_params"])
+            elif args.problem == "E_flow":
+                residuals = e_flow_residual({
+                    "kappa": conditioning[:, 0],
+                    "ec_V": pred_by_name["ec_V"], "u_flow": pred_by_name["u_flow"], "v_flow": pred_by_name["v_flow"],
+                })
+            else:
+                residuals = va_residual({
+                    "rho_water": conditioning[:, 0],
+                    "p_t_re": pred_by_name["Re{p_t}"], "p_t_im": pred_by_name["Im{p_t}"],
+                    "Sxx_re": pred_by_name["Re{Sxx}"], "Sxx_im": pred_by_name["Im{Sxx}"],
+                    "Sxy_re": pred_by_name["Re{Sxy}"], "Sxy_im": pred_by_name["Im{Sxy}"],
+                    "Syy_re": pred_by_name["Re{Syy}"], "Syy_im": pred_by_name["Im{Syy}"],
+                    "x_u_re": pred_by_name["Re{x_u}"], "x_u_im": pred_by_name["Im{x_u}"],
+                    "x_v_re": pred_by_name["Re{x_v}"], "x_v_im": pred_by_name["Im{x_v}"],
+                })
+            for eq_name, residual in residuals.items():
+                k = f"{eq_name}_pde_residual"
+                sums[k] = sums.get(k, 0.0) + pde_residual_metric(residual)
                 counts[k] = counts.get(k, 0) + 1
 
         if is_elder:

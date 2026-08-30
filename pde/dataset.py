@@ -72,20 +72,14 @@ PROBLEM_SPECS = {
         ],
     },
     "Elder": {
-        # Elder is routed through _init_elder / _get_elder (its own 10-step rollout code path,
-        # not the standard PROBLEM_SPECS-driven input/outputs loader), so this entry only carries
-        # descriptive metadata for the README's system table -- it has no "input"/"outputs" keys.
         "full_name": "Mass-Transport-Fluid",
         "coupling": "bidirectional",
     },
 }
 
-# diffusion_reaction (PDEBench) isn't in PROBLEM_SPECS -- it's handled by a separate loading path
-# (_init_diffusion_reaction / _get_diffusion_reaction), not the PROBLEM_SPECS-driven directory
-# matcher. This carries the same descriptive metadata (full_name, coupling) for the README table.
 DIFFUSION_REACTION_METADATA = {
     "full_name": "Diffusion-Reaction (PDEBench)",
-    "coupling": "bidirectional",  # activator/inhibitor fields are mutually coupled
+    "coupling": "bidirectional", 
 }
 
 ELDER_ROLLOUT_FIELDS = ["u_u", "u_v", "c_flow"]
@@ -240,10 +234,6 @@ class MultiPhysicsFieldDataset(Dataset):
         self._pde_array = _load_pdebench_diffusion_reaction(self.root_dir)  # (N,T,X,Y,C)
         n_samples_total, n_t = self._pde_array.shape[0], self._pde_array.shape[1]
 
-        # Deterministic 90/10 split by sample index so train/val are disjoint (PDEBench ships a
-        # single monolithic file with no native train/test split). First 90% of indices ->
-        # training, last 10% -> testing/val. With >=2 samples, always leave at least one sample
-        # on each side.
         split_key = str(self.split).lower()
         train_keys = {"training", "train"}
         test_keys = {"testing", "test", "val", "validation"}
@@ -331,6 +321,7 @@ class MultiPhysicsFieldDataset(Dataset):
         if self.max_samples is not None:
             idxs = idxs[: self.max_samples]
         self._sample_indices = idxs
+        self._elliptic_dir = os.path.join(problem_root, "ellipticcsv") if self.problem == "TE_heat" else None
 
     def __len__(self) -> int:
         return len(self._sample_indices)
@@ -363,7 +354,11 @@ class MultiPhysicsFieldDataset(Dataset):
                 by_label[f["label"]] = _to_chw_tensor(arr, self.image_size)
 
         tasks = [by_label[name] for name in self.task_names]
-        return {"conditioning": conditioning, "tasks": tasks, "task_names": self.task_names}
+        sample = {"conditioning": conditioning, "tasks": tasks, "task_names": self.task_names}
+        if self._elliptic_dir is not None:
+            arr = _load_csv_field(os.path.join(self._elliptic_dir, f"{idx}.csv"))
+            sample["elliptic_params"] = torch.as_tensor(arr, dtype=torch.float32).reshape(-1)[:3]
+        return sample
 
     def _get_elder(self, i: int) -> Dict:
         idx = self._sample_indices[i]
@@ -408,4 +403,7 @@ def collate_fn(batch: List[Dict]) -> Dict:
     conditioning = torch.stack([b["conditioning"] for b in batch], dim=0)
     n_tasks = len(batch[0]["tasks"])
     tasks = [torch.stack([b["tasks"][i] for b in batch], dim=0) for i in range(n_tasks)]
-    return {"conditioning": conditioning, "tasks": tasks, "task_names": batch[0]["task_names"]}
+    out = {"conditioning": conditioning, "tasks": tasks, "task_names": batch[0]["task_names"]}
+    if "elliptic_params" in batch[0]:
+        out["elliptic_params"] = torch.stack([b["elliptic_params"] for b in batch], dim=0)
+    return out

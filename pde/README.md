@@ -166,6 +166,83 @@ they're close, the simplification is fine as-is; if the encoder's output scale d
 significantly during training, this may need periodic recalibration (e.g. once per epoch) rather
 than the current once-per-run calibration.
 
+## 8. PDE-residual error metric (TE_heat, E_flow, VA)
+
+Alongside `rel_l2`/`spectral_l2` (closeness to the reference solution), `TE_heat`, `E_flow`, and
+`VA` evaluations now also report a **physical-validity** metric: plug the predicted output fields
+into the problem's actual governing PDE and measure how much the equation is violated. Reported
+per equation as `{equation}_pde_residual` (e.g. `flow_continuity_pde_residual`,
+`acoustic_real_pde_residual`, `e_field_pde_residual`).
+
+**Metric definition**: DiffusionPDE's own evaluation formula (Huang et al., NeurIPS 2024,
+arXiv:2406.17763) — plain mean-squared PDE-operator residual over the spatial grid,
+`L_pde = mean(residual**2)`, no relative/reference normalization. This is deliberately *not*
+Multiphysics-Bench's internal PINN-training convention (`pde/multiphysics-bench/pinns/train_*.py`),
+which divides by arbitrary problem-specific constants and zeroes/clips boundary and outlier
+values purely for gradient-balancing during training — those are training-stability hacks, not a
+physically meaningful metric, and are deliberately dropped here.
+
+**Governing equations, constants, and grid spacing**, extracted from Multiphysics-Bench's own PINN
+loss code (`pinns/train_{te_heat,e_flow,VA}.py::get_*_loss`) and cross-validated against the
+COMSOL `.m` geometry scripts in `DataProcessing/data_generate/` (in-code comments for grid
+spacing are frequently stale/wrong; the numeric literals, confirmed against COMSOL geometry, are
+authoritative):
+
+- **E_flow** (`pde/pde_residuals.py::e_flow_residual`, unidirectional -- coupling should be
+  neutral here, the falsification case): `div(kappa*grad(V)) = 0` (Poisson potential, `kappa` is
+  the input material field) + `du_flow/dx + dv_flow/dy = 0` (flow continuity). Grid 128x128,
+  `dx=dy=1.28e-3/128` (1.28mm x 1.28mm domain). Verified byte-for-byte (max abs diff `0.0`)
+  against a direct reimplementation of `get_E_flow_loss`'s math on identical synthetic input.
+- **VA** (`pde/pde_residuals.py::va_residual`, bidirectional, 6 residual equations across
+  complex-valued fields): acoustic Helmholtz `div(grad(p)/rho_water) + omega^2*p/(rho_water*c_ac^2)
+  = 0` (real & imag) + structural equilibrium `dSxx/dx + dSxy/dy + x_u = 0`,
+  `dSxy/dx + dSyy/dy + x_v = 0` (real & imag each). `omega = pi*1e5` rad/s (50kHz, confirmed
+  against `VA.m`'s `f='50[kHz]'`), `c_ac=1.48144e3` m/s (fixed scalar -- COMSOL's actual model
+  uses a temperature-dependent `soundspeed(T)`; matched here to the benchmark's own PINN-loss
+  simplification for consistency with the reference implementation, not "corrected"). `rho_water`
+  is the spatially-varying input field itself, not a scalar. Grid 128x128,
+  `dx=dy=(40/128)*1e-3` (40mm x 40mm domain, confirmed against `VA.m`'s `sq1` size).
+- **TE_heat** (`pde/pde_residuals.py::te_heat_residual`, bidirectional -- E-field <-> temperature
+  via Joule heating): complex Helmholtz `laplace(Ez) + K_E*Ez = 0` where
+  `K_E = mu_r*k_0^2*(eps_r - i*sigma/(omega*eps_0))`, `sigma = q*sigma_coef*exp(-Eg/(kB*T))`, plus
+  steady-state heat `rho*laplace(T) + 0.5*sigma*|Ez|^2 = 0`. `eps_r`/`rho`/`sigma_coef` are
+  piecewise constants (`11.7`/`70`/`mater`-value inside a circular material inclusion, `1`/`mater`-
+  value/`~0` outside) selected via a material-inclusion mask built from `elliptic_params`
+  (circle center/radius). That geometry is **not** in the standard `mater`/`Ez`/`T` `.mat` field
+  dirs -- Multiphysics-Bench stores it separately, one CSV per sample, in an `ellipticcsv/`
+  directory alongside them (confirmed present in the Hugging Face download); `pde/dataset.py`
+  now loads it (`_init_standard`'s `_elliptic_dir`, TE_heat only) and `collate_fn` batches it as
+  `elliptic_params`. Constants: `f=4e9 Hz`, `k_0=2*pi*f/3e8`, `omega=2*pi*f`, `q=1.602` (**not**
+  literal SI elementary charge -- almost certainly a rescaled constant tuned for well-conditioned
+  NN training in the original benchmark; matched here exactly rather than "corrected", for the
+  same reasoning as VA's fixed `c_ac` above), `mu_r=1`, `eps_0=8.854e-12` F/m,
+  `kB=8.6173e-5` eV/K, `Eg=1.12` eV. Grid 128x128, `dx=dy=1e-3` m (128mm x 128mm domain).
+  Verified byte-for-byte (max abs diff `0.0`) against a direct reimplementation of
+  `get_TE_heat_loss`'s math on identical synthetic input.
+
+  Two implementation notes, both disclosed rather than silently assumed: (1) uses the raw
+  `mater` field as loaded from the `.mat` file directly, in the same physical/raw units as every
+  other field in this pipeline -- Multiphysics-Bench's own `compute_loss()` rescales a
+  *normalized NN input* tensor back to physical units before calling `generate_separa_mater`,
+  which doesn't apply here since `mater` is never normalized in this pipeline in the first place;
+  sanity-check residual magnitudes against real data before fully trusting this assumption.
+  (2) predicted `T` is clamped to a `>=1.0` floor before entering `exp(-Eg/(kB*T))` -- an
+  untrained/early-training network's raw output has no constraint keeping it physically positive,
+  and `T->0` blows the exponential up to inf/nan; Multiphysics-Bench never hits this because their
+  own `T` always passes through a bounded rescaling first. The floor is a no-op for any physically
+  plausible predicted temperature.
+- **MHD and NS_heat -- excluded from this metric entirely, documented discrepancy.** Verified
+  byte-for-byte across three copies of `get_MHD_loss` (`pinns/train_MHD.py`, `evaluate_MHD.py`,
+  `DiffusionPDE/scripts/generate_MHD.py`): `Br` and `Jz` are accepted as function parameters but
+  **never referenced in the residual body** -- the implementable residual is just two decoupled
+  divergence-free constraints (`div(u)=0`, `div(J)=0`), with no Lorentz-force/Ampere's-law
+  coupling term, despite the paper's stated equations including one. `get_NS_heat_loss` has the
+  same pattern -- no momentum equation anywhere, just continuity + convection-diffusion heat
+  transport. Both are real discrepancies between the paper's stated physics and the benchmark's
+  own verified reference implementation, not something missed in extraction. MHD stays in the
+  existing `rel_l2`/`spectral_l2` comparison (the real data reflects genuine MHD physics even
+  though this residual check doesn't); NS_heat was never in scope for this metric.
+
 ## Important notes
 
 - `Elder`'s 10-timestep rollout is loaded as 30 extra output channels (3 fields x 10 steps)
