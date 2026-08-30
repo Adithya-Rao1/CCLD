@@ -164,6 +164,58 @@ def _list_sample_indices(field_dir: str, is_dir_per_sample: bool = False) -> Lis
     return sorted(idxs)
 
 
+def _standard_split_sample_indices(problem_root: str, spec: Dict) -> List[int]:
+    try:
+        input_dirs = [_find_field_dir(problem_root, f["candidates"]) for f in spec["input"]]
+        output_dirs = [_find_field_dir(problem_root, f["candidates"]) for f in spec["outputs"]]
+    except FileNotFoundError:
+        return []
+    try:
+        idxs = set(_list_sample_indices(output_dirs[0]))
+        for d in input_dirs + output_dirs[1:]:
+            idxs &= set(_list_sample_indices(d))
+    except FileNotFoundError:
+        return []
+    return sorted(idxs)
+
+
+def _testing_split_broken(root_dir: str, problem: str) -> bool:
+    testing_root = os.path.join(root_dir, "testing", problem)
+    if not os.path.isdir(testing_root):
+        return False
+    spec = PROBLEM_SPECS[problem]
+    return not _standard_split_sample_indices(testing_root, spec)
+
+
+_HELD_OUT_SPLIT_DIR = os.path.join(os.path.dirname(__file__), "held_out_splits")
+
+
+def _held_out_split_path(problem: str) -> str:
+    return os.path.join(_HELD_OUT_SPLIT_DIR, f"{problem}_held_out_split.pt")
+
+
+def _get_or_create_held_out_split(problem_root: str, spec: Dict, problem: str) -> Dict:
+    path = _held_out_split_path(problem)
+    if os.path.isfile(path):
+        cached = torch.load(path)
+        if cached.get("source_problem_root") == problem_root:
+            return cached
+    idxs = _standard_split_sample_indices(problem_root, spec)
+    if not idxs:
+        raise FileNotFoundError(f"No usable samples found under {problem_root} to build a held-out split from")
+    n_total = len(idxs)
+    n_train = int(round(n_total * 0.9))
+    if n_total >= 2:
+        n_train = min(max(n_train, 1), n_total - 1)
+    else:
+        n_train = n_total
+    split = {"train": idxs[:n_train], "test": idxs[n_train:], "source_problem_root": problem_root, "n_total": n_total}
+    if not os.path.isfile(path):
+        os.makedirs(_HELD_OUT_SPLIT_DIR, exist_ok=True)
+        torch.save(split, path)
+    return split
+
+
 def _find_h5_file(root_dir: str) -> str:
     candidates = sorted(glob.glob(os.path.join(root_dir, "**", "*diff-react*.h5"), recursive=True))
     if not candidates:
@@ -284,7 +336,16 @@ class MultiPhysicsFieldDataset(Dataset):
 
     def _init_standard(self, n_tasks, task_subset):
         spec = PROBLEM_SPECS[self.problem]
-        problem_root = os.path.join(self.root_dir, self.split, self.problem)
+        split_key = str(self.split).lower()
+        train_keys = {"training", "train"}
+        test_keys = {"testing", "test", "val", "validation"}
+        self._use_held_out_split = (
+            split_key in (train_keys | test_keys) and _testing_split_broken(self.root_dir, self.problem)
+        )
+        if self._use_held_out_split:
+            problem_root = os.path.join(self.root_dir, "training", self.problem)
+        else:
+            problem_root = os.path.join(self.root_dir, self.split, self.problem)
         self._input_dirs = [(_find_field_dir(problem_root, f["candidates"]), f["ext"]) for f in spec["input"]]
 
         resolved_outputs = []
@@ -317,7 +378,17 @@ class MultiPhysicsFieldDataset(Dataset):
             raise ValueError(f"task_subset {unknown} not among native labels {native_labels} for {self.problem}")
         self.task_names = labels
 
-        idxs = _list_sample_indices(resolved_outputs[0]["dir"])
+        if self._use_held_out_split:
+            held_out = _get_or_create_held_out_split(problem_root, spec, self.problem)
+            idxs = held_out["train"] if split_key in train_keys else held_out["test"]
+        else:
+            idxs = _standard_split_sample_indices(problem_root, spec)
+            if not idxs:
+                checked = [d for d, _ in self._input_dirs] + [f["dir"] for f in resolved_outputs]
+                raise FileNotFoundError(
+                    f"No sample indices are present in ALL of {self.problem}'s field directories "
+                    f"under {problem_root} ({self.split} split). Checked: {checked}"
+                )
         if self.max_samples is not None:
             idxs = idxs[: self.max_samples]
         self._sample_indices = idxs

@@ -279,9 +279,8 @@ authoritative):
   `/home/ubuntu/metis-v1-storage/CSHM-data/multiphysics`): `inside=[1.00068e11, 2.99955e11]`,
   `outside=[10.0007, 19.9967]` -- cleanly disjoint, unlike the buggy circle geometry's run (which
   gave fully overlapping ranges, `inside=[10.0007, 2.99955e11]` vs `outside=[10.0327, 2.98922e11]`).
-  Note: that run reported `testing: 0 samples found` for TE_heat -- still unresolved, likely a
-  different directory layout or naming for the testing split on the remote box; worth checking
-  with `ls`/`find` before running a real testing-split evaluation.
+  Note: that run reported `testing: 0 samples found` for TE_heat -- root-caused and handled, see
+  "TE_heat eval fix" below.
 - **MHD and NS_heat -- excluded from this metric entirely, documented discrepancy.** Verified
   byte-for-byte across three copies of `get_MHD_loss` (`pinns/train_MHD.py`, `evaluate_MHD.py`,
   `DiffusionPDE/scripts/generate_MHD.py`): `Br` and `Jz` are accepted as function parameters but
@@ -400,6 +399,50 @@ regularizes the rank-deficient case regardless of how large `sigma` is calibrate
 fixed default like every other caller (`synthetic/run_experiment.py`,
 `synthetic/anderson_tikhonov_n_sweep.py`). Verified robust across 10 random seeds locally
 (previously reproducible within a handful).
+
+## 10. TE_heat eval fix: a held-out split carved from training
+
+`testing/TE_heat/mater/` is empty on the real Multiphysics-Bench release -- confirmed by direct
+inspection (`os.listdir` on the remote box): `testing/TE_heat/Ez/` and `testing/TE_heat/T/` each
+have 1000 populated `.mat` files (`100001.mat`..`101000.mat`), `testing/TE_heat/mater/` has 0.
+Instead, testing ships a `polycsv/` directory: one CSV per sample, each holding a **variable
+number of `(x, y)` vertex pairs** (11 rows for one sample, 12 for another, confirmed by direct
+inspection) -- an arbitrary polygon boundary, not `ellipticcsv`'s fixed `[e_a, e_b, angle]`
+three-value ellipse format. This isn't a directory-naming mismatch to patch around: testing's
+material inclusions are geometrically more general than training's (polygons vs. ellipses), and
+even granting a polygon-membership test, there's no way to recover the material *property
+values* inside/outside the inclusion from geometry alone -- confirmed by reading
+Multiphysics-Bench's own PINN training scripts (`pinns/train_te_heat.py`), which load their
+testing *inputs* from a private pre-cached tensor file
+(`/data/bailichen/PDE/PDE/DeepONet/TE_Heat/data/TE_heat_test_128_3w.pt`) never published to
+Hugging Face -- there is no documented, reproducible way to regenerate `mater` for testing from
+what's publicly available.
+
+Silently falling back to evaluating on the same samples used for training would be data leakage;
+crashing (the original failure mode -- `pde/dataset.py`'s sample-index discovery trusted the
+first output field's directory listing and assumed every other directory, including the input,
+shared the same indices) wastes a full training run before failing at the first evaluation
+batch. Instead, `pde/dataset.py::_testing_split_broken` detects this specific situation (a
+`testing/{problem}/` directory that **exists** but has zero samples usable across all its field
+directories -- deliberately not triggered when the testing directory is simply absent, e.g. every
+local smoke-test fixture, which keeps its prior, simpler `except (FileNotFoundError, ValueError):
+val_ds = train_ds` fallback in `run_experiment.py` unchanged) and falls back to a deterministic
+90/10 split carved from the **training** directory instead.
+
+For reproducibility -- every method/architecture/seed in the grid must be scored against
+literally the same held-out samples, not independently-and-possibly-differently re-derived
+splits -- this split is computed once and **persisted** to
+`pde/held_out_splits/{problem}_held_out_split.pt` on first use, then reused verbatim by every
+subsequent run against the same `--data-root` (validated via a `source_problem_root` field in the
+cached file; a mismatched root, e.g. a local smoke-test fixture, recomputes fresh in-memory
+without touching the persisted canonical file). **Commit this file once generated on the real
+data** so the exact held-out split is fixed across machines, not just across runs on one box.
+Covered by a dedicated regression test, `tests/test_dataset_held_out_split.py` (verifies the
+train/test slices are disjoint, partition the full training set, persist correctly, and that a
+wholly-absent testing directory does *not* trigger this fallback).
+
+Only confirmed necessary for `TE_heat` so far; `E_flow`/`VA`'s testing splits have not been
+independently verified and may be fine as-is (the mechanism only activates when actually needed).
 
 ## Important notes
 
