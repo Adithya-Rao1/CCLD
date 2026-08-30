@@ -145,11 +145,12 @@ def precompute_transition_params(
     return params
 
 
-def sample_and_tikhonov_score_target(Z0: torch.Tensor, Phi_t: torch.Tensor, Sigma_t: torch.Tensor, N: int, lam: float, jitter: float = 1e-8):
+def sample_and_tikhonov_score_target(Z0: torch.Tensor, Phi_t: torch.Tensor, Sigma_t: torch.Tensor, N: int, lam: float, jitter: float = 1e-6):
     B = Z0.shape[0]
     device = Z0.device
     mean = Z0 @ Phi_t.T
-    Sigma_reg = Sigma_t + jitter * torch.eye(2 * N, device=device)
+    scale = Sigma_t.diagonal().abs().max().clamp_min(1.0)
+    Sigma_reg = Sigma_t + jitter * scale * torch.eye(2 * N, device=device)
     L = torch.linalg.cholesky(Sigma_reg)
     eps = torch.randn(B, 2 * N, device=device)
     Zt = mean + eps @ L.T
@@ -158,7 +159,7 @@ def sample_and_tikhonov_score_target(Z0: torch.Tensor, Phi_t: torch.Tensor, Sigm
     Sxv = Sigma_t[:N, N:]
     Svx = Sigma_t[N:, :N]
     Svv = Sigma_t[N:, N:]
-    Sxx_inv = torch.linalg.inv(Sxx + jitter * torch.eye(N, device=device))
+    Sxx_inv = torch.linalg.inv(Sxx + jitter * scale * torch.eye(N, device=device))
     Var_V_given_X = Svv - Svx @ Sxx_inv @ Sxv
 
     diff_x = Zt[:, :N] - mean[:, :N]

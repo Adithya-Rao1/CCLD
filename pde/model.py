@@ -189,3 +189,36 @@ class PhysicsModel(nn.Module):
 
     def decode(self, task_name: str, latent: torch.Tensor) -> torch.Tensor:
         return self.heads[task_name].decode(latent)
+
+
+class SpatialFieldModel(nn.Module):
+    def __init__(
+        self,
+        task_names: List[str],
+        cond_in_ch: int,
+        out_hw: Tuple[int, int] = (128, 128),
+        backbone_ch: int = 128,
+        base_ch: int = 32,
+        n_downsample: int = 3,
+        init_ch: int = 32,
+    ):
+        super().__init__()
+        self.task_names = list(task_names)
+        self.out_hw = out_hw
+        self.backbone = PhysicsBackbone(cond_in_ch, base_ch=base_ch, out_ch=backbone_ch, n_downsample=n_downsample)
+        self.init_heads = nn.ModuleDict({
+            name: nn.Sequential(ConvBlock(self.backbone.out_ch, init_ch), nn.Conv2d(init_ch, 1, 1))
+            for name in self.task_names
+        })
+
+    def encode(self, conditioning: torch.Tensor, k_reference: float = 1.0):
+        feat, _ = self.backbone(conditioning)
+        B = conditioning.shape[0]
+        k_const = torch.full((B, 1), k_reference, device=conditioning.device, dtype=conditioning.dtype)
+        X0 = {
+            name: F.interpolate(self.init_heads[name](feat), size=self.out_hw, mode="bilinear", align_corners=False)
+            for name in self.task_names
+        }
+        K_self = [[k_const] for _ in self.task_names]
+        K_global = [k_const for _ in self.task_names]
+        return X0, K_self, K_global

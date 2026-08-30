@@ -205,11 +205,20 @@ authoritative):
 - **TE_heat** (`pde/pde_residuals.py::te_heat_residual`, bidirectional -- E-field <-> temperature
   via Joule heating): complex Helmholtz `laplace(Ez) + K_E*Ez = 0` where
   `K_E = mu_r*k_0^2*(eps_r - i*sigma/(omega*eps_0))`, `sigma = q*sigma_coef*exp(-Eg/(kB*T))`, plus
-  steady-state heat `rho*laplace(T) + 0.5*sigma*|Ez|^2 = 0`. `eps_r`/`rho`/`sigma_coef` are
-  piecewise constants (`11.7`/`70`/`mater`-value inside the material inclusion, `1`/`mater`-
+  steady-state heat `rho*laplace(T) + 0.5*sigma*|Ez|^2 = 0`.
+
+  `mater` is TE_heat's raw material-property conditioning field -- a 128x128 array per sample
+  (`{split}/TE_heat/mater/{idx}.mat`), the same kind of role `kappa` plays in E_flow or
+  `rho_water` in VA. Its *physical meaning switches* depending on which region of the domain a
+  pixel falls in: inside the elliptical material inclusion it feeds `sigma_coef_map`, the
+  coefficient behind the electrical conductivity term `sigma = q*sigma_coef*exp(-Eg/(kB*T))`;
+  outside the inclusion it's instead the background's thermal conductivity `rho_map`. So `eps_r`/
+  `rho`/`sigma_coef` are piecewise constants (`11.7`/`70`/`mater`-value inside, `1`/`mater`-
   value/`~0` outside) selected via a material-inclusion mask built from `elliptic_params`
   (rotated ellipse -- see the flagged upstream-bug note below for why this is a rotated ellipse
-  and not a circle). That geometry is **not** in the standard `mater`/`Ez`/`T` `.mat` field
+  and not a circle). Getting that mask wrong doesn't just mislabel a region -- it plugs `mater`'s
+  numeric value into the wrong physics term for every misclassified pixel. That geometry is
+  **not** in the standard `mater`/`Ez`/`T` `.mat` field
   dirs -- Multiphysics-Bench stores it separately, one CSV per sample, in an `ellipticcsv/`
   directory alongside them (confirmed present in the Hugging Face download); `pde/dataset.py`
   now loads it (`_init_standard`'s `_elliptic_dir`, TE_heat only) and `collate_fn` batches it as
@@ -261,15 +270,18 @@ authoritative):
   rendered COMSOL image and should be sanity-checked if TE_heat results look physically off.
   **Action item for the user**: fork Multiphysics-Bench and report this upstream.
 
-  `TE_HEAT_MATER_INSIDE_RANGE`/`TE_HEAT_MATER_OUTSIDE_RANGE` (used by `te_heat_normalize_mater`)
-  were recomputed against the real dataset with the corrected geometry via
-  `pde/compute_te_heat_mater_ranges.py` (10000 training samples,
-  `/home/ubuntu/metis-v1-storage/CSHM-data/multiphysics`):
-  `inside=[1.00068e11, 2.99955e11]`, `outside=[10.0007, 19.9967]` -- cleanly disjoint, unlike the
-  buggy circle geometry's run (which gave fully overlapping ranges). Note: that run reported
-  `testing: 0 samples found` for TE_heat -- still unresolved, likely a different directory layout
-  or naming for the testing split on the remote box; worth checking with `ls`/`find` before
-  running a real testing-split evaluation.
+  **Verification of the fix**, two independent ways: (1) on the real `ellipticcsv/1.csv` sample
+  (`e_a=18.518mm, e_b=13.005mm, angle=320.05deg`), the corrected test classifies 4.59% of pixels
+  "inside," matching the analytic ellipse-area prediction (`pi*e_a*e_b / domain_area = 4.62%`)
+  almost exactly. (2) `TE_HEAT_MATER_INSIDE_RANGE`/`TE_HEAT_MATER_OUTSIDE_RANGE` (used by
+  `te_heat_normalize_mater`) were recomputed against the real dataset with the corrected geometry
+  via `pde/compute_te_heat_mater_ranges.py` (10000 training samples,
+  `/home/ubuntu/metis-v1-storage/CSHM-data/multiphysics`): `inside=[1.00068e11, 2.99955e11]`,
+  `outside=[10.0007, 19.9967]` -- cleanly disjoint, unlike the buggy circle geometry's run (which
+  gave fully overlapping ranges, `inside=[10.0007, 2.99955e11]` vs `outside=[10.0327, 2.98922e11]`).
+  Note: that run reported `testing: 0 samples found` for TE_heat -- still unresolved, likely a
+  different directory layout or naming for the testing split on the remote box; worth checking
+  with `ls`/`find` before running a real testing-split evaluation.
 - **MHD and NS_heat -- excluded from this metric entirely, documented discrepancy.** Verified
   byte-for-byte across three copies of `get_MHD_loss` (`pinns/train_MHD.py`, `evaluate_MHD.py`,
   `DiffusionPDE/scripts/generate_MHD.py`): `Br` and `Jz` are accepted as function parameters but
@@ -281,6 +293,79 @@ authoritative):
   own verified reference implementation, not something missed in extraction. MHD stays in the
   existing `rel_l2`/`spectral_l2` comparison (the real data reflects genuine MHD physics even
   though this residual check doesn't); NS_heat was never in scope for this metric.
+
+## 9. Score-network architecture ablation (`--score-arch`)
+
+`--score-arch {attention, fno}` (default `attention`) selects the network that predicts scores
+during CSHO/DDPM/SDM training and sampling, for `TE_heat`, `E_flow`, `VA`. `attention` is the
+original, unchanged pipeline (`pde/model.py::PhysicsModel`/`MultiPhysicsScoreNetwork` -- a pooled
+per-task latent vector `(B, latent_dim)`, refined via cross-field attention). `fno` is new:
+**native-pixel diffusion** -- each task's diffused state is the full field itself, `(B, 1, H, W)`,
+with no latent-vector bottleneck, denoised by an FNO (`pde/fno_score_net.py`, needs
+`neuraloperator`: `pip install neuraloperator`).
+
+```
+python -m pde.run_experiment \
+  --config pde/config.yaml --data-root /data/multiphysics --problem TE_heat \
+  --method csho --score-arch fno --seeds 0,1,2,3,4 \
+  --out-dir results/experiment_2_physics/TE_heat_csho_fno
+```
+
+`--fno-modes` (default `"12,12"`), `--fno-hidden-channels` (default 128), `--fno-init-channels`
+(default 32) tune the FNO; `n_modes` must not exceed the working resolution (`--image-size`).
+
+**Why `fno` needed real architecture changes, not just a network swap.** Read through
+`pde/model.py`/`pde/run_experiment.py` before starting this phase and found the `attention` path
+doesn't do textbook noise-to-data generative sampling: `PhysicsModel.encode(conditioning)`
+produces a *deterministic* per-task starting point (no randomness), and the reverse SDE
+(`--n-diff-steps` defaults to 2) is a short, learned refinement of it. More importantly,
+`MultiPhysicsScoreNetwork.forward` never sees the position state `X` at all -- only the velocity
+`V` (`make_score_fn`'s closure silently drops the `X` argument every caller already supplies). This
+was a placeholder limitation, not a design choice to preserve, so `fno`'s score network(s) fix it
+by construction: `pde/fno_score_net.py::FNOScoreNetwork` conditions on **both** `X` and `V` (plus
+the raw conditioning field and timestep) at every step, matching proper
+critically-damped-Langevin-style scoring (`score(x_t, v_t, t)`, not `score(v_t, t)`). The
+`attention` path / `MultiPhysicsScoreNetwork` is left exactly as-is (superseded for CSHO methods
+under `fno`, not patched in place) -- zero risk to already-produced `attention`-path results.
+
+**What changed, concretely, for `fno`:**
+- `pde/model.py::SpatialFieldModel` replaces `PhysicsModel` for this path: `PhysicsBackbone` is
+  reused unchanged, but `FieldHead`'s vector round-trip (`to_latent`/`readout_proj`/
+  `readout_conv`/`readout_out`) is dropped entirely. A lightweight per-task CNN head (structurally
+  identical to `FieldHead`'s `y0_head`) produces the deterministic initial state `X0` directly in
+  native `(B,1,H,W)` field space -- the only source of the diffused state, no pooling anywhere.
+  `decode` is the identity; the reverse SDE's final state *is* the prediction.
+- Training loss is `init_loss + lambda_tikhonov * tikhonov` (CSHO) -- `readout_loss` is dropped
+  since it would be literally redundant with `init_loss` now that decode is the identity (both
+  would compare the same tensor to target).
+- `synthetic/`'s SDE machinery (`anderson_sde.py`, `exact_dsm.py`, `drift_coupled_gamma.py`)
+  needed **zero changes** -- confirmed via full reads: task coupling lives entirely in Python-list
+  nesting and `(N,N)`/`(2N,2N)` matrices (`N` = task count), never in the per-task payload tensor's
+  shape; every payload-tensor op is elementwise or `.shape`-derived. The existing
+  flatten-into-rows trick (`X[i][0].reshape(-1,1)` -> cat over tasks -> `sample_and_
+  tikhonov_score_target` -> reshape back) generalizes unchanged from `(B,latent_dim)` to
+  `(B,1,H,W)`; only the *restore* reshape needed to capture `orig_shape = X[0][0].shape` generically
+  instead of hardcoding `(B, latent_dim)` (this generalization also applies to the `attention` path
+  now, behavior-identical there since `orig_shape` reduces to `(B, latent_dim)`).
+
+**Discovered along the way, fixed in the shared `synthetic/exact_dsm.py`:
+`sample_and_tikhonov_score_target`'s default `jitter` was an absolute floor (`1e-8`), not scaled to
+`Sigma_t`'s magnitude.** `Sigma_t` at low `t_idx` (few noise-injection steps accumulated so far) is
+*mathematically* rank-deficient -- only `N` of `2N` noise dimensions have been injected yet -- so
+its smallest eigenvalues sit at floating-point-roundoff level and can go slightly negative once the
+calibrated `sigma` scales up, making `torch.linalg.cholesky` fail intermittently. Verified this is
+**path-independent** (affects `attention` and `fno` equally -- reproduced by sweeping `sigma`
+values directly through `precompute_transition_params`, no encoder involved), was only surfaced by
+this phase's new smoke tests, and independently confirmed for real on `synthetic/`'s own N-sweep
+(`synthetic/anderson_tikhonov_n_sweep.py`), which hit the identical `linalg.cholesky` failure at
+N=5 on the user's A100. `jitter` (`synthetic/exact_dsm.py::sample_and_tikhonov_score_target`,
+default now `1e-6`) is interpreted as **relative** to `Sigma_t.diagonal().abs().max()` rather than
+a bare additive constant, so it stays negligible for well-conditioned `Sigma_t` but reliably
+regularizes the rank-deficient case regardless of how large `sigma` is calibrated to.
+`pde/run_experiment.py`'s call site no longer needs (or has) a local override -- it inherits the
+fixed default like every other caller (`synthetic/run_experiment.py`,
+`synthetic/anderson_tikhonov_n_sweep.py`). Verified robust across 10 random seeds locally
+(previously reproducible within a handful).
 
 ## Important notes
 
