@@ -206,9 +206,10 @@ authoritative):
   via Joule heating): complex Helmholtz `laplace(Ez) + K_E*Ez = 0` where
   `K_E = mu_r*k_0^2*(eps_r - i*sigma/(omega*eps_0))`, `sigma = q*sigma_coef*exp(-Eg/(kB*T))`, plus
   steady-state heat `rho*laplace(T) + 0.5*sigma*|Ez|^2 = 0`. `eps_r`/`rho`/`sigma_coef` are
-  piecewise constants (`11.7`/`70`/`mater`-value inside a circular material inclusion, `1`/`mater`-
+  piecewise constants (`11.7`/`70`/`mater`-value inside the material inclusion, `1`/`mater`-
   value/`~0` outside) selected via a material-inclusion mask built from `elliptic_params`
-  (circle center/radius). That geometry is **not** in the standard `mater`/`Ez`/`T` `.mat` field
+  (rotated ellipse -- see the flagged upstream-bug note below for why this is a rotated ellipse
+  and not a circle). That geometry is **not** in the standard `mater`/`Ez`/`T` `.mat` field
   dirs -- Multiphysics-Bench stores it separately, one CSV per sample, in an `ellipticcsv/`
   directory alongside them (confirmed present in the Hugging Face download); `pde/dataset.py`
   now loads it (`_init_standard`'s `_elliptic_dir`, TE_heat only) and `collate_fn` batches it as
@@ -217,8 +218,9 @@ authoritative):
   NN training in the original benchmark; matched here exactly rather than "corrected", for the
   same reasoning as VA's fixed `c_ac` above), `mu_r=1`, `eps_0=8.854e-12` F/m,
   `kB=8.6173e-5` eV/K, `Eg=1.12` eV. Grid 128x128, `dx=dy=1e-3` m (128mm x 128mm domain).
-  Verified byte-for-byte (max abs diff `0.0`) against a direct reimplementation of
-  `get_TE_heat_loss`'s math on identical synthetic input.
+  The E-field and heat residual *formulas* (everything except the material-inclusion mask itself)
+  are verified byte-for-byte (max abs diff `0.0`) against a direct reimplementation of
+  `get_TE_heat_loss`'s math on identical synthetic input, using the same mask on both sides.
 
   Two implementation notes, both disclosed rather than silently assumed: (1) uses the raw
   `mater` field as loaded from the `.mat` file directly, in the same physical/raw units as every
@@ -226,11 +228,48 @@ authoritative):
   *normalized NN input* tensor back to physical units before calling `generate_separa_mater`,
   which doesn't apply here since `mater` is never normalized in this pipeline in the first place;
   sanity-check residual magnitudes against real data before fully trusting this assumption.
-  (2) predicted `T` is clamped to a `>=1.0` floor before entering `exp(-Eg/(kB*T))` -- an
-  untrained/early-training network's raw output has no constraint keeping it physically positive,
-  and `T->0` blows the exponential up to inf/nan; Multiphysics-Bench never hits this because their
-  own `T` always passes through a bounded rescaling first. The floor is a no-op for any physically
-  plausible predicted temperature.
+  (2) predicted `T` is mapped through a differentiable `softplus(T_raw) + 1.0` (not a hard
+  `clamp`) before entering `exp(-Eg/(kB*T))`, so it's always strictly positive with a smooth
+  gradient -- an untrained/early-training network's raw output has no constraint keeping it
+  physically positive, and `T->0` blows the exponential up to inf/nan; Multiphysics-Bench never
+  hits this because their own `T` always passes through a bounded rescaling first.
+
+  **Flagged: upstream bug in Multiphysics-Bench's `identify_mater`, deliberately not matched
+  here.** `elliptic_params` (`ellipticcsv/{idx}.csv`) is `[e_a, e_b, angle]` -- an ellipse's
+  semi-major axis, semi-minor axis (mm), and rotation angle (degrees) -- confirmed via
+  `DataProcessing/data_generate/TE_heat/generate_Elliptic_TE_heat.m` (`parm_e_a=20*rand+10`,
+  `parm_e_b=10*rand+10`, `parm_angle=360*rand`, written to CSV in exactly that order) and the
+  COMSOL model `TE_heat.m` (`geom1.feature('e1').set('semiaxes',{'e_a' 'e_b'})`,
+  `.set('rot','angle')`, with no explicit `.set('pos', ...)` for `e1` -- unlike every other shape
+  in the script -- so the ellipse is centered at the domain origin). Multiphysics-Bench's own
+  `identify_mater` (`pinns/train_te_heat.py`) instead reads these three values as a **circle's**
+  `(center_x, center_y, radius)`: `cx=params[:,0]`, `cy=params[:,1]`, `r=params[:,2]`,
+  `(xx-cx)**2+(yy-cy)**2 <= r**2`. Since `angle` ranges up to 360 (used squared, as an effective
+  radius up to ~360mm against a 128mm domain), this swallows nearly the whole grid for most
+  samples. Confirmed empirically on the real dataset (`pde/compute_te_heat_mater_ranges.py`,
+  10000 training samples): **~93% of all pixels classified "inside"**, with fully overlapping
+  inside/outside value ranges (`inside=[10.0007, 2.99955e11]`, `outside=[10.0327, 2.98922e11]`) --
+  physically nonsensical for a small inclusion in a larger domain. `pde/pde_residuals.py::
+  _te_heat_mater_iden` therefore implements the **geometrically correct** rotated-ellipse test
+  (rotate the query point by `-angle` into the ellipse's own frame, then
+  `(x_local/e_a)^2 + (y_local/e_b)^2 <= 1`) instead of matching `identify_mater`'s formula -- a
+  deliberate, documented exception to the "match the benchmark exactly" principle used everywhere
+  else in this port, since the original formula doesn't locate the actual material boundary.
+  `e_a`/`e_b` are assumed to be in the same mm-based COMSOL length unit as the domain's other
+  geometry (128mm/148mm squares use the same bare-number convention); this assumption, and the
+  rotation-direction (CW vs CCW) sign convention, were not independently pixel-verified against a
+  rendered COMSOL image and should be sanity-checked if TE_heat results look physically off.
+  **Action item for the user**: fork Multiphysics-Bench and report this upstream.
+
+  `TE_HEAT_MATER_INSIDE_RANGE`/`TE_HEAT_MATER_OUTSIDE_RANGE` (used by `te_heat_normalize_mater`)
+  were recomputed against the real dataset with the corrected geometry via
+  `pde/compute_te_heat_mater_ranges.py` (10000 training samples,
+  `/home/ubuntu/metis-v1-storage/CSHM-data/multiphysics`):
+  `inside=[1.00068e11, 2.99955e11]`, `outside=[10.0007, 19.9967]` -- cleanly disjoint, unlike the
+  buggy circle geometry's run (which gave fully overlapping ranges). Note: that run reported
+  `testing: 0 samples found` for TE_heat -- still unresolved, likely a different directory layout
+  or naming for the testing split on the remote box; worth checking with `ls`/`find` before
+  running a real testing-split evaluation.
 - **MHD and NS_heat -- excluded from this metric entirely, documented discrepancy.** Verified
   byte-for-byte across three copies of `get_MHD_loss` (`pinns/train_MHD.py`, `evaluate_MHD.py`,
   `DiffusionPDE/scripts/generate_MHD.py`): `Br` and `Jz` are accepted as function parameters but

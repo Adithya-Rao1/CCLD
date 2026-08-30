@@ -58,10 +58,7 @@ def main():
             if outside_vals.numel():
                 outside_min = min(outside_min, outside_vals.min().item())
                 outside_max = max(outside_max, outside_vals.max().item())
-
-            # sanity check: do inside/outside populations actually stay disjoint (as observed in
-            # the one local sample checked), or is there real overlap the hardcoded formula's
-            # region split doesn't capture cleanly?
+                
             n_inside_px += inside_vals.numel()
             n_outside_px += outside_vals.numel()
             n_samples += 1

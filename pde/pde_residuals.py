@@ -85,19 +85,25 @@ TE_HEAT_EG = 1.12
 
 
 def _te_heat_mater_iden(elliptic_params: torch.Tensor, H: int, W: int, device, dtype) -> torch.Tensor:
+    e_a = (elliptic_params[:, 0] * 1e-3).view(-1, 1, 1)  # mm -> m, semi-major axis
+    e_b = (elliptic_params[:, 1] * 1e-3).view(-1, 1, 1)  # mm -> m, semi-minor axis
+    angle_rad = (elliptic_params[:, 2] * math.pi / 180.0).view(-1, 1, 1)  # degrees -> radians
+
     coords_x = (torch.arange(H, device=device, dtype=dtype) - (H - 1) / 2) * TE_HEAT_GRID["dx"]
     coords_y = (torch.arange(W, device=device, dtype=dtype) - (W - 1) / 2) * TE_HEAT_GRID["dy"]
     xx, yy = torch.meshgrid(coords_x, coords_y, indexing="ij")
-    cx = elliptic_params[:, 0].view(-1, 1, 1)
-    cy = elliptic_params[:, 1].view(-1, 1, 1)
-    r = elliptic_params[:, 2].view(-1, 1, 1)
-    distance_sq = (xx - cx) ** 2 + (yy - cy) ** 2
-    return torch.where(distance_sq <= r ** 2, torch.ones_like(distance_sq), -torch.ones_like(distance_sq))
+    xx, yy = xx.unsqueeze(0), yy.unsqueeze(0)
+
+    cos_t, sin_t = torch.cos(angle_rad), torch.sin(angle_rad)
+    x_local = xx * cos_t + yy * sin_t
+    y_local = -xx * sin_t + yy * cos_t
+    membership = (x_local / e_a) ** 2 + (y_local / e_b) ** 2
+    return torch.where(membership <= 1.0, torch.ones_like(membership), -torch.ones_like(membership))
 
 
-TE_HEAT_MATER_INSIDE_RANGE = (1e11, 3e11)
+TE_HEAT_MATER_INSIDE_RANGE = (100068292443.0, 299954624539.0)
 TE_HEAT_MATER_INSIDE_NORM_RANGE = (0.1, 0.9)
-TE_HEAT_MATER_OUTSIDE_RANGE = (10.0, 20.0)
+TE_HEAT_MATER_OUTSIDE_RANGE = (10.000702606509638, 19.996693794649573)
 TE_HEAT_MATER_OUTSIDE_NORM_RANGE = (-0.9, -0.1)
 
 
