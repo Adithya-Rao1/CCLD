@@ -105,28 +105,35 @@ def _state_norm(X: List[List[torch.Tensor]]) -> float:
     return torch.cat([x[0].reshape(BATCH, -1) for x in X], dim=1).norm(dim=1).mean().item()
 
 
+ATTENTION_LATENT_DIM = 16 
+
+def _prior_state_shape(score_arch: str):
+    if score_arch in ("fno", "songunet"):
+        return (BATCH, 1, IMAGE_SIZE, IMAGE_SIZE)
+    return (BATCH, ATTENTION_LATENT_DIM)
+
+
 def zero_score_round_trip(score_arch: str, problem: str, device) -> Dict[str, float]:
     task_names = PROBLEM_TASK_NAMES[problem]
     N = len(task_names)
     args = _make_args(score_arch, REAL_N_DIFF_STEPS, REAL_DT)
     args.alpha_list = [1.0] * N
-    args.beta_list = [1.0] * N
+    args.beta_list = [0.5] * N  # pde/run_experiment.py --beta default
 
-    model, score_net, is_spatial = _build_model_and_score_net(score_arch, task_names, REAL_N_DIFF_STEPS, device)
-    conditioning = torch.randn(BATCH, COND_IN_CH, IMAGE_SIZE, IMAGE_SIZE, device=device)
-
-    with torch.no_grad():
-        X, K_self, K_global, _, _ = _encode_state(args, model, task_names, conditioning, is_spatial)
+    shape = _prior_state_shape(score_arch)
+    X = [[torch.randn(shape, device=device)] for _ in range(N)]  # prior_std=1.0
+    k_const = torch.full((BATCH, 1), args.k_reference, device=device)
+    K_self = [[k_const] for _ in range(N)]
+    K_global = [k_const for _ in range(N)]
 
     gamma_self, gamma_couple = calibrate_coupled_gammas(
         args.alpha_list[0], args.beta_list[0], args.k_reference, args.k_reference, N,
         regime=args.damping_regime, target_zeta=args.target_zeta,
     )
-    sigma = _calibrate_sigma(model, conditioning, N, gamma_self, args, device, task_names, is_spatial)
-    state = build_method_state(args, N, device, sigma=sigma)
+    state = build_method_state(args, N, device, sigma=0.0)
     cfg, coupling, g_per_task = state["cfg"], state["coupling"], state["g_per_task"]
     G = build_g_matrix_n(
-        torch.tensor(sigma, device=device), N, diffusion_mode=cfg["diffusion_mode"],
+        torch.tensor(0.0, device=device), N, diffusion_mode=cfg["diffusion_mode"],
         g_per_task=g_per_task, coupling_matrix=coupling if cfg["diffusion_mode"] == "independent" else None,
     )
 
@@ -153,7 +160,7 @@ def _train_csho_briefly(score_arch: str, problem: str, n_diff_steps: int, dt: fl
     N = len(task_names)
     args = _make_args(score_arch, n_diff_steps, dt)
     args.alpha_list = [1.0] * N
-    args.beta_list = [1.0] * N
+    args.beta_list = [0.5] * N  # pde/run_experiment.py --beta default
 
     model, score_net, is_spatial = _build_model_and_score_net(score_arch, task_names, n_diff_steps, device)
     optimizer = torch.optim.Adam(list(model.parameters()) + list(score_net.parameters()), lr=1e-3)
