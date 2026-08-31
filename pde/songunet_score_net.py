@@ -29,12 +29,13 @@ class SongUNetScoreNetwork(nn.Module):
         super().__init__()
         self.n_tasks = n_tasks
         self.n_diff_steps = n_diff_steps
-        in_ch = 2 * n_tasks + cond_in_ch  # X channels + V channels + conditioning (t via noise_labels)
+        in_ch = 2 * n_tasks + cond_in_ch  # X channels + V channels + t channels 
         self.net = SongUNet(
             img_resolution=img_resolution, in_channels=in_ch, out_channels=n_tasks, label_dim=0,
             model_channels=model_channels, channel_mult=_parse_channel_mult(channel_mult),
             channel_mult_emb=4, num_blocks=num_blocks, attn_resolutions=list(attn_resolutions),
         )
+        self.output_gain = nn.Parameter(torch.ones(n_tasks))
 
     def forward(
         self,
@@ -49,6 +50,7 @@ class SongUNetScoreNetwork(nn.Module):
         noise_labels = torch.full((B,), float(t) / self.n_diff_steps,
                                    device=conditioning.device, dtype=conditioning.dtype)
         out = self.net(torch.cat([x_stack, v_stack, conditioning], dim=1), noise_labels, None)
+        out = out * self.output_gain.view(1, -1, 1, 1)
         return [[out[:, i:i + 1]] for i in range(self.n_tasks)]
 
 
@@ -73,12 +75,14 @@ class FlatSongUNetScoreNetwork(nn.Module):
             model_channels=model_channels, channel_mult=_parse_channel_mult(channel_mult),
             channel_mult_emb=4, num_blocks=num_blocks, attn_resolutions=list(attn_resolutions),
         )
+        self.output_gain = nn.Parameter(torch.ones(n_tasks))
 
     def forward(self, conditioning: torch.Tensor, X: List[torch.Tensor], t) -> List[torch.Tensor]:
         B = conditioning.shape[0]
         noise_labels = torch.full((B,), float(t) / self.n_diff_steps,
                                    device=conditioning.device, dtype=conditioning.dtype)
         out = self.net(torch.cat(X + [conditioning], dim=1), noise_labels, None)
+        out = out * self.output_gain.view(1, -1, 1, 1)
         return list(out.split(1, dim=1))
 
 
