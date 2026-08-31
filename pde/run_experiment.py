@@ -25,8 +25,12 @@ from pde.dataset import ALL_PROBLEMS, MultiPhysicsFieldDataset, collate_fn, _get
 from pde.pde_residuals import e_flow_residual, pde_residual_metric, te_heat_normalize_mater, te_heat_residual, va_residual
 
 
-def _normalized_l1_loss(pred, target, mean: float, std: float):
-    return F.l1_loss((pred - mean) / std, (target - mean) / std)
+def _normalize_targets(targets, target_mean, target_std):
+    return [(t - mean) / std for t, mean, std in zip(targets, target_mean, target_std)]
+
+def _denormalize_preds(preds, target_mean, target_std):
+    return [p * std + mean for p, mean, std in zip(preds, target_mean, target_std)]
+
 
 def _model_input_conditioning(args, batch, conditioning):
     if args.problem == "TE_heat":
@@ -326,12 +330,13 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
             if "elliptic_params" in batch:
                 batch["elliptic_params"] = batch["elliptic_params"].to(device)
             targets = [t.to(device) for t in batch["tasks"]]
+            targets_norm = _normalize_targets(targets, target_mean, target_std)
             model_conditioning = _model_input_conditioning(args, batch, conditioning)
             X, K_self, K_global, feat, y0 = _encode_state(args, model, task_names, model_conditioning, is_spatial)
 
             init_loss = torch.zeros((), device=device)
-            for name, y0_t, target, mean, std in zip(task_names, [y0[n] for n in task_names], targets, target_mean, target_std):
-                init_loss = init_loss + _normalized_l1_loss(y0_t, target, mean, std)
+            for name, y0_t, target_n in zip(task_names, [y0[n] for n in task_names], targets_norm):
+                init_loss = init_loss + F.l1_loss(y0_t, target_n)
 
             t_idx = torch.randint(1, args.n_diff_steps + 1, (1,)).item()
 
@@ -355,9 +360,9 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
                     loss = init_loss + args.lambda_tikhonov * tikhonov
                 else:
                     readout_loss = torch.zeros((), device=device)
-                    for name, x, target, mean, std in zip(task_names, X, targets, target_mean, target_std):
+                    for name, x, target_n in zip(task_names, X, targets_norm):
                         pred = model.decode(name, x[0])
-                        readout_loss = readout_loss + _normalized_l1_loss(pred, target, mean, std)
+                        readout_loss = readout_loss + F.l1_loss(pred, target_n)
                     loss = init_loss + readout_loss + args.lambda_tikhonov * tikhonov
             else:
                 X0_flat = [x[0] for x in X]
@@ -376,9 +381,9 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
                     loss = init_loss + args.lambda_tikhonov * diffusion_loss
                 else:
                     readout_loss = torch.zeros((), device=device)
-                    for name, x, target, mean, std in zip(task_names, X, targets, target_mean, target_std):
+                    for name, x, target_n in zip(task_names, X, targets_norm):
                         pred = model.decode(name, x[0])
-                        readout_loss = readout_loss + _normalized_l1_loss(pred, target, mean, std)
+                        readout_loss = readout_loss + F.l1_loss(pred, target_n)
                     loss = init_loss + readout_loss + args.lambda_tikhonov * diffusion_loss
 
             optimizer.zero_grad()
@@ -396,7 +401,8 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
                 nan_events += 1
             n_steps += 1
 
-    metrics = evaluate(args, model, score_net, val_loader, device, task_names, state, gamma_self, gamma_couple, is_spatial)
+    metrics = evaluate(args, model, score_net, val_loader, device, task_names, state, gamma_self, gamma_couple,
+                        is_spatial, target_mean, target_std)
     metrics["nan_events"] = float(nan_events)
     metrics["explosion_events"] = float(explosion_events)
     metrics["n_train_steps"] = float(n_steps)
@@ -405,7 +411,7 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
 
 @torch.no_grad()
 def evaluate(args, model, score_net, val_loader, device, task_names, state, gamma_self, gamma_couple,
-             is_spatial: bool = False) -> Dict[str, float]:
+             is_spatial: bool = False, target_mean=None, target_std=None) -> Dict[str, float]:
     model.eval()
     score_net.eval()
     is_csho = state["is_csho"]
@@ -464,9 +470,10 @@ def evaluate(args, model, score_net, val_loader, device, task_names, state, gamm
             final_latents = X_flat
 
         if is_spatial:
-            preds = final_latents
+            preds_norm = final_latents
         else:
-            preds = [model.decode(name, final_latents[i]) for i, name in enumerate(task_names)]
+            preds_norm = [model.decode(name, final_latents[i]) for i, name in enumerate(task_names)]
+        preds = _denormalize_preds(preds_norm, target_mean, target_std)
 
         for name, pred, target in zip(task_names, preds, targets):
             rel = relative_l2_error(pred, target)

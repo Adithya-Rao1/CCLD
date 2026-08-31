@@ -453,7 +453,7 @@ wholly-absent testing directory does *not* trigger this fallback).
 Only confirmed necessary for `TE_heat` so far; `E_flow`/`VA`'s testing splits have not been
 independently verified and may be fine as-is (the mechanism only activates when actually needed).
 
-## 11. Per-task target normalization (training-loss only)
+## 11. Per-task target normalization (network output space)
 
 Every problem's output tasks span wildly different raw physical scales *within the same joint
 loss*, confirmed by direct inspection of the real data: `TE_heat`'s `Ez` has |value| mean
@@ -477,22 +477,44 @@ dynamic range, not evidence of real learning.
 caching philosophy as Section 10's held-out split — computed once, reused identically by every
 subsequent method/architecture/seed so the whole grid stays validly comparable; a key mismatch,
 e.g. a local smoke-test fixture, recomputes fresh in-memory without touching the persisted
-canonical file). `run_experiment.py::_normalized_l1_loss` applies `(x - mean)/std` to **both**
-sides of `init_loss` and `readout_loss` before computing L1 -- this only rescales each task's
-gradient contribution to be comparable in magnitude; it does not change what `y0`/`decode()`
-predict (still raw physical units throughout), so eval metrics (`rel_l2`/`spectral_l2`/
-`pde_residual`) and the DSM/Tikhonov score-matching pathway are completely unaffected and required
-no changes.
+canonical file). The network's raw output (`y0`, `model.decode(...)`, and the spatial
+(`fno`/`songunet`) path's `X0`) is trained to predict **directly in normalized space** —
+`run_experiment.py::_normalize_targets` precomputes `(target - mean)/std` once per batch, and
+`init_loss`/`readout_loss` compare the network's raw output to that directly (plain `F.l1_loss`,
+no transform on the prediction side). `evaluate()` denormalizes (`_denormalize_preds`,
+`pred*std + mean`) only at the very end, right before `rel_l2`/`spectral_l2`/`pde_residual` are
+computed, which is the one place raw physical units are actually needed.
 
-**Deliberately not matching Multiphysics-Bench's own convention.** Their PINN training scripts
-(`pinns/train_{te_heat,e_flow,VA}.py::compute_loss`) normalize the same way for the same reason,
-but with a different scheme: min-max scaling to `[-0.9, 0.9]` (per-task, from precomputed range
-files they ship and we don't have) for essentially everything, with `TE_heat`'s complex `Ez` field
-specifically using symmetric abs-max scaling shared across its Re/Im pair to preserve phase (`VA`'s
-6 complex fields, by contrast, min-max each real/imag channel independently, same as everything
-else). Z-score is used here instead -- since this normalization only rescales our own training
-loss's internal gradient balance, not anything directly comparable to their reported numbers, it
-doesn't need to match exactly.
+**A first attempt at this got the design wrong, worth recording.** The initial version instead
+left the network's raw output targeting raw physical scale directly, and only applied `(x-mean)/std`
+symmetrically to *both* sides of the L1 comparison (`_normalized_l1_loss(pred, target, mean, std)
+= L1((pred-mean)/std, (target-mean)/std)`). That successfully fixed the *instability*
+(`explosion_events` dropped from ~28-31% of steps to ~0.3%, confirmed on real `TE_heat` data at
+the full 50-epoch budget) but did **not** fix the actual learning problem: algebraically, that
+loss still requires `pred → target` exactly, so the network's output head still had to grow huge
+internal weights to reach `Ez`'s ~2.7e5 scale, and Adam's step size is bounded in *parameter*
+space regardless of the raw distance to travel in *output* space -- confirmed empirically,
+`Re{Ez}_rel_l2` stayed at ~0.995 (no better than the original broken run) even at the full 7000
+training steps. The corrected design above -- network predicts small, normalized values
+throughout; denormalize only for eval -- means the network never needs large internal weights to
+represent a large-scale task at all. Verified directly with a synthetic fixture reproducing the
+same pathology (one task with a huge raw scale ~2.7e5 like `Ez`, others tiny): the huge-scale
+task reached `rel_l2`≈0.096 after 30 epochs on 8 samples, vs. ~0.995 under the first attempt.
+
+**Matches Multiphysics-Bench's structural approach, not its numeric scheme.** Their PINN training
+scripts (`pinns/train_{te_heat,e_flow,VA}.py::compute_loss`) follow the exact same *structure* the
+corrected design above uses: network predicts in normalized space, the supervised loss compares
+normalized-to-normalized, and only *afterward* do they denormalize back to physical units (before
+computing their own PDE-residual loss term) -- confirmed by reading `compute_loss()` in all three
+files. Where this deliberately differs is the numeric scheme: they use min-max scaling to
+`[-0.9, 0.9]` (per-task, from precomputed range files they ship and we don't have) for essentially
+everything, with `TE_heat`'s complex `Ez` field specifically using symmetric abs-max scaling shared
+across its Re/Im pair to preserve phase (`VA`'s 6 complex fields, by contrast, min-max each
+real/imag channel independently, same as everything else). Z-score is used here instead -- since
+this normalization only affects our own training loss's internal representation, not anything
+directly comparable to their reported numbers, the exact scheme doesn't need to match, only the
+structural principle (network output space is normalized; physics/metrics use denormalized raw
+units) does.
 
 ## Important notes
 
