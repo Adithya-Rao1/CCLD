@@ -235,14 +235,14 @@ def _rollout_ratio(trained: dict, n_diff_steps: int, dt: float, device) -> float
         conditioning = trained["conditioning"]
         X, K_self, K_global, feat, _ = _encode_state(args, model, task_names, conditioning, is_spatial)
         cfg, coupling, g_per_task, sigma = state["cfg"], state["coupling"], state["g_per_task"], state["sigma"]
-        V = [[torch.zeros_like(x[0])] for x in X]
-        X_cur, V_cur = X, V
-        x0_norm = _state_norm(X)
         G = build_g_matrix_n(
             torch.tensor(sigma, device=device), N, diffusion_mode=cfg["diffusion_mode"],
             g_per_task=g_per_task, coupling_matrix=coupling if cfg["diffusion_mode"] == "independent" else None,
         )
         score_fn, _ = _build_score_fns(args, score_net, feat)
+
+        V = [[torch.zeros_like(x[0])] for x in X]
+        X_cur, V_cur = X, V
         for t_idx in reversed(range(1, n_diff_steps + 1)):
             score_outputs = score_fn(X_cur, V_cur, t_idx)
             X_cur, V_cur = anderson_reverse_step_coupled_gamma(
@@ -250,8 +250,19 @@ def _rollout_ratio(trained: dict, n_diff_steps: int, dt: float, device) -> float
                 args.alpha_list, args.beta_list, trained["gamma_self"], trained["gamma_couple"],
                 coupling, args.constant_k, dt, G,
             )
-        xf_norm = _state_norm(X_cur)
-    return xf_norm / max(x0_norm, 1e-8)
+        xf_norm_trained = _state_norm(X_cur)
+
+        V0 = [[torch.zeros_like(x[0])] for x in X]
+        X0_cur, V0_cur = X, V0
+        zero_score = [[torch.zeros_like(x[0])] for x in X]
+        for t_idx in reversed(range(1, n_diff_steps + 1)):
+            X0_cur, V0_cur = anderson_reverse_step_coupled_gamma(
+                X0_cur, V0_cur, K_self, K_global, zero_score, t_idx, n_diff_steps,
+                args.alpha_list, args.beta_list, trained["gamma_self"], trained["gamma_couple"],
+                coupling, args.constant_k, dt, G,
+            )
+        xf_norm_zero = _state_norm(X0_cur)
+    return xf_norm_trained / max(xf_norm_zero, 1e-8)
 
 
 def step_count_sweep(score_arch: str, problem: str, device) -> Dict[str, dict]:
