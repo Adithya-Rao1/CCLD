@@ -99,7 +99,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "transition kernel valid, the same role K_REFERENCE plays in synthetic/")
     p.add_argument("--constant-k", action="store_true")
     p.add_argument("--n-diff-steps", type=int, default=2)
-    p.add_argument("--dt", type=float, default=0.5)
+    p.add_argument("--dt", type=float, default=None)
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--n-epochs", type=int, default=5)
     p.add_argument("--lr", type=float, default=1e-3)
@@ -148,6 +148,8 @@ def parse_args(argv=None) -> argparse.Namespace:
 
     args.seeds = [int(s) for s in str(args.seeds).split(",") if s.strip() != ""]
     args.task_subset = [t.strip() for t in args.task_subset.split(",")] if args.task_subset else None
+    if args.dt is None:
+        args.dt = 1.0 / args.n_diff_steps
     return args
 
 
