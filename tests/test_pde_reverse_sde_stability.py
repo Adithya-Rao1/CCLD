@@ -34,7 +34,7 @@ IMAGE_SIZE = 32
 BATCH = 4
 
 REAL_N_DIFF_STEPS = 20
-REAL_DT = 0.5
+REAL_DT = 1.0 / REAL_N_DIFF_STEPS 
 
 ZERO_SCORE_RATIO_BOUND = 3.0
 STEP_SWEEP_RATIO_BOUND = 3.0
@@ -250,8 +250,9 @@ def _rollout_ratio(trained: dict, n_diff_steps: int, dt: float, device) -> float
 def step_count_sweep(score_arch: str, problem: str, device) -> Dict[str, dict]:
     results = {}
     for n_diff_steps in STEP_SWEEP_N_DIFF_STEPS:
-        trained = _train_csho_briefly(score_arch, problem, n_diff_steps, REAL_DT, device, STEP_SWEEP_N_TRAIN_STEPS)
-        ratio = _rollout_ratio(trained, n_diff_steps, REAL_DT, device)
+        dt = 1.0 / n_diff_steps
+        trained = _train_csho_briefly(score_arch, problem, n_diff_steps, dt, device, STEP_SWEEP_N_TRAIN_STEPS)
+        ratio = _rollout_ratio(trained, n_diff_steps, dt, device)
         passed = math.isfinite(ratio) and ratio < STEP_SWEEP_RATIO_BOUND
         results[n_diff_steps] = {"ratio": ratio, "passed": passed}
     return results
