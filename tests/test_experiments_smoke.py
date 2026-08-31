@@ -72,10 +72,6 @@ def test_experiment_2_physics_smoke():
     tmp = tempfile.mkdtemp(prefix="csho_smoke_exp2_")
     try:
         rng = np.random.default_rng(0)
-        # pde/dataset.py's NS_heat spec expects a directory tree of per-field CSVs:
-        # {data_root}/{split}/NS_heat/{field_dir}/{sample_idx}.csv (first-match field
-        # dir names, from PROBLEM_SPECS["NS_heat"]: input "Q_heat", outputs "u_u",
-        # "u_v", and "u_T" (first candidate of ["u_T", "T"])).
         problem_root = os.path.join(tmp, "training", "NS_heat")
         for field in ["Q_heat", "u_u", "u_v", "u_T"]:
             field_dir = os.path.join(problem_root, field)
@@ -93,14 +89,12 @@ def test_experiment_2_physics_smoke():
         args = parse_args(argv)
         metrics = train_one_seed(args, seed=0)
         assert all(np.isfinite(v) for v in metrics.values()), metrics
+        assert all(v < 5.0 for k, v in metrics.items() if k.endswith("_rel_l2")), metrics
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
 def test_experiment_2_physics_smoke_e_flow():
-    # Exercises the new PDE-residual metric (pde/pde_residuals.py::e_flow_residual), wired into
-    # evaluate() for E_flow specifically. Field dirs per PROBLEM_SPECS["E_flow"]: input "kappa",
-    # outputs "ec_V", "u_flow", "v_flow" (all real-valued .mat).
     import scipy.io as sio
 
     from pde.run_experiment import parse_args, train_one_seed
@@ -125,16 +119,13 @@ def test_experiment_2_physics_smoke_e_flow():
         args = parse_args(argv)
         metrics = train_one_seed(args, seed=0)
         assert all(np.isfinite(v) for v in metrics.values()), metrics
+        assert all(v < 5.0 for k, v in metrics.items() if k.endswith("_rel_l2")), metrics
         assert "flow_continuity_pde_residual" in metrics and "current_continuity_pde_residual" in metrics, metrics
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
 def test_experiment_2_physics_smoke_te_heat():
-    # Exercises pde_residuals.py::te_heat_residual (piecewise material-mask reconstruction from
-    # elliptic_params + the complex Helmholtz/heat residual). Field dirs per
-    # PROBLEM_SPECS["TE_heat"]: input "mater" (real), outputs "Ez" (complex), "T" (real); plus
-    # the ellipticcsv/{idx}.csv geometry files pde/dataset.py now loads for this problem only.
     import scipy.io as sio
 
     from pde.run_experiment import parse_args, train_one_seed
@@ -170,6 +161,7 @@ def test_experiment_2_physics_smoke_te_heat():
         args = parse_args(argv)
         metrics = train_one_seed(args, seed=0)
         assert all(np.isfinite(v) for v in metrics.values()), metrics
+        assert all(v < 5.0 for k, v in metrics.items() if k.endswith("_rel_l2")), metrics
         assert "e_field_pde_residual" in metrics and "heat_pde_residual" in metrics, metrics
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -206,6 +198,7 @@ def test_experiment_2_physics_smoke_va():
         args = parse_args(argv)
         metrics = train_one_seed(args, seed=0)
         assert all(np.isfinite(v) for v in metrics.values()), metrics
+        assert all(v < 5.0 for k, v in metrics.items() if k.endswith("_rel_l2")), metrics
         for eq in ["acoustic_real", "acoustic_imag", "structure_x_real", "structure_x_imag", "structure_y_real", "structure_y_imag"]:
             assert f"{eq}_pde_residual" in metrics, metrics
     finally:
@@ -237,6 +230,7 @@ def test_experiment_2_physics_smoke_e_flow_fno():
         args = parse_args(argv)
         metrics = train_one_seed(args, seed=0)
         assert all(np.isfinite(v) for v in metrics.values()), metrics
+        assert all(v < 5.0 for k, v in metrics.items() if k.endswith("_rel_l2")), metrics
         assert "flow_continuity_pde_residual" in metrics and "current_continuity_pde_residual" in metrics, metrics
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -267,6 +261,7 @@ def test_experiment_2_physics_smoke_e_flow_fno_ddpm():
         args = parse_args(argv)
         metrics = train_one_seed(args, seed=0)
         assert all(np.isfinite(v) for v in metrics.values()), metrics
+        assert all(v < 5.0 for k, v in metrics.items() if k.endswith("_rel_l2")), metrics
         assert "flow_continuity_pde_residual" in metrics and "current_continuity_pde_residual" in metrics, metrics
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -307,6 +302,7 @@ def test_experiment_2_physics_smoke_te_heat_fno():
         args = parse_args(argv)
         metrics = train_one_seed(args, seed=0)
         assert all(np.isfinite(v) for v in metrics.values()), metrics
+        assert all(v < 5.0 for k, v in metrics.items() if k.endswith("_rel_l2")), metrics
         assert "e_field_pde_residual" in metrics and "heat_pde_residual" in metrics, metrics
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -334,7 +330,7 @@ def test_experiment_2_physics_smoke_va_fno():
 
         argv = [
             "--data-root", tmp, "--problem", "VA", "--method", "csho", "--n-diff-steps", "2",
-            "--batch-size", "2", "--n-epochs", "1", "--seeds", "0", "--max-samples", "10", "--image-size", "8",
+            "--batch-size", "2", "--n-epochs", "10", "--seeds", "0", "--max-samples", "10", "--image-size", "8",
             "--score-arch", "fno", "--fno-modes", "4,4", "--fno-hidden-channels", "8", "--fno-init-channels", "8",
             "--base-channels", "8", "--n-downsample", "1", "--num-workers", "0", "--device", "cpu",
             "--out-dir", os.path.join(tmp, "out"),
@@ -342,6 +338,7 @@ def test_experiment_2_physics_smoke_va_fno():
         args = parse_args(argv)
         metrics = train_one_seed(args, seed=0)
         assert all(np.isfinite(v) for v in metrics.values()), metrics
+        assert all(v < 5.0 for k, v in metrics.items() if k.endswith("_rel_l2")), metrics
         for eq in ["acoustic_real", "acoustic_imag", "structure_x_real", "structure_x_imag", "structure_y_real", "structure_y_imag"]:
             assert f"{eq}_pde_residual" in metrics, metrics
     finally:
@@ -356,9 +353,6 @@ _SONGUNET_ARGS = [
 
 
 def test_experiment_2_physics_smoke_e_flow_songunet():
-    # Exercises the native-pixel-diffusion SongUNet score-network path (--score-arch songunet,
-    # pde/songunet_score_net.py::SongUNetScoreNetwork -- the raw DiffusionPDE SongUNet, reused
-    # directly from the vendored clone, called without its own EDM preconditioning wrappers).
     import scipy.io as sio
 
     from pde.run_experiment import parse_args, train_one_seed
@@ -381,13 +375,13 @@ def test_experiment_2_physics_smoke_e_flow_songunet():
         args = parse_args(argv)
         metrics = train_one_seed(args, seed=0)
         assert all(np.isfinite(v) for v in metrics.values()), metrics
+        assert all(v < 5.0 for k, v in metrics.items() if k.endswith("_rel_l2")), metrics
         assert "flow_continuity_pde_residual" in metrics and "current_continuity_pde_residual" in metrics, metrics
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
 def test_experiment_2_physics_smoke_e_flow_songunet_ddpm():
-    # Exercises the songunet path's baseline (non-CSHO) branch, FlatSongUNetScoreNetwork.
     import scipy.io as sio
 
     from pde.run_experiment import parse_args, train_one_seed
@@ -410,6 +404,7 @@ def test_experiment_2_physics_smoke_e_flow_songunet_ddpm():
         args = parse_args(argv)
         metrics = train_one_seed(args, seed=0)
         assert all(np.isfinite(v) for v in metrics.values()), metrics
+        assert all(v < 5.0 for k, v in metrics.items() if k.endswith("_rel_l2")), metrics
         assert "flow_continuity_pde_residual" in metrics and "current_continuity_pde_residual" in metrics, metrics
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -447,6 +442,7 @@ def test_experiment_2_physics_smoke_te_heat_songunet():
         args = parse_args(argv)
         metrics = train_one_seed(args, seed=0)
         assert all(np.isfinite(v) for v in metrics.values()), metrics
+        assert all(v < 5.0 for k, v in metrics.items() if k.endswith("_rel_l2")), metrics
         assert "e_field_pde_residual" in metrics and "heat_pde_residual" in metrics, metrics
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -480,6 +476,7 @@ def test_experiment_2_physics_smoke_va_songunet():
         args = parse_args(argv)
         metrics = train_one_seed(args, seed=0)
         assert all(np.isfinite(v) for v in metrics.values()), metrics
+        assert all(v < 5.0 for k, v in metrics.items() if k.endswith("_rel_l2")), metrics
         for eq in ["acoustic_real", "acoustic_imag", "structure_x_real", "structure_x_imag", "structure_y_real", "structure_y_imag"]:
             assert f"{eq}_pde_residual" in metrics, metrics
     finally:

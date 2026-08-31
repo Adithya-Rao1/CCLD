@@ -184,12 +184,39 @@ and of `pde_residual_metric` that used `mean(residual**2)`** — that was never 
 against DiffusionPDE's source, just assumed; this is neither MSE nor MAE, and DiffusionPDE itself
 has no MAE-style residual metric anywhere in its codebase (confirmed by full-repo grep) — its
 evaluation scripts (`evaluate_te_heat.py` etc.) don't call their own PDE-loss functions at all,
-reporting only RMSE/nRMSE/MaxError/bRMSE/fRMSE on field *values*, never on PDE residuals. This is
-deliberately *not* Multiphysics-Bench's internal PINN-training convention
-(`pde/multiphysics-bench/pinns/train_*.py`), which divides by arbitrary problem-specific constants
-and zeroes/clips boundary and outlier values purely for gradient-balancing during training — those
-are training-stability hacks, not a physically meaningful metric, and are deliberately dropped
-here.
+reporting only RMSE/nRMSE/MaxError/bRMSE/fRMSE on field *values*, never on PDE residuals.
+
+**Per-term rescaling divisors** (corrected — an earlier version of this file called these a
+"PINN-only training-stability hack, deliberately dropped" and this port's residual functions
+returned the raw, undivided residual; that framing was wrong). `generate_*.py` — DiffusionPDE's
+own guidance-loss computation, not just Multiphysics-Bench's separate `pinns/train_*.py`
+scripts — divides the raw residual by a problem/term-specific constant *before* taking the norm.
+Because the L2 norm is homogeneous, dividing pre-norm is algebraically identical to dividing the
+final metric, so this port applies the same divisors as named, overridable constants (default
+arguments, so a future sensitivity sweep can pass different values) in `pde/pde_residuals.py`:
+
+| Constant | Value | Source | Applies to |
+|---|---|---|---|
+| `TE_HEAT_E_FIELD_RESIDUAL_SCALE` | `1e6` | `generate_TE_heat.py:171` | `te_heat_residual`'s `e_field` term |
+| `TE_HEAT_HEAT_RESIDUAL_SCALE` | `1e6` | `generate_TE_heat.py:172` | `te_heat_residual`'s `heat` term |
+| `E_FLOW_FLOW_CONTINUITY_SCALE` | `1e3` | `generate_E_flow.py:61` | `e_flow_residual`'s `flow_continuity` term |
+| `E_FLOW_CURRENT_CONTINUITY_SCALE` | `1e6` | `generate_E_flow.py:62` | `e_flow_residual`'s `current_continuity` term |
+| `VA_ACOUSTIC_SCALE` | `1e6` | `generate_VA.py:127-130` | `va_residual`'s `acoustic_real`/`acoustic_imag` terms |
+| `VA_STRUCTURE_SCALE` | `1e3` | `generate_VA.py:131-133` | `va_residual`'s four `structure_{x,y}_{real,imag}` terms |
+
+Discovered because a real (non-smoke) `--score-arch fno` run reported `e_field_pde_residual`≈
+9.3e7–9.8e7 and `heat_pde_residual`≈1.58e6–1.59e6 even on the working `attention`-path model —
+implausibly large. Dividing those observed numbers by `1e6` lands them at ≈93 and ≈1.6, both in
+the sane O(1)-O(100) range expected of a trained model's residual — matching the divisor almost
+exactly and confirming this was the missing piece, not a modeling bug. (MHD/NS_heat divisors were
+also found while tracing this — `1e2`/`1e2` and `1e6`/`1e3` respectively — recorded here for
+completeness even though those two problems are excluded from this metric entirely, see below.)
+
+Also flagged, not actionable but worth knowing: the arXiv paper's Eq. 9 states
+`L_pde = mean(residual**2)` (MSE, no sqrt), which does **not** match what the actual vendored code
+computes (`norm(residual,2)/(H*W)`, no squaring) — a paper/code discrepancy. This port matches the
+*code*, consistent with this repo's established practice of trusting verified source over
+descriptions.
 
 **Governing equations, constants, and grid spacing**, extracted from Multiphysics-Bench's own PINN
 loss code (`pinns/train_{te_heat,e_flow,VA}.py::get_*_loss`) and cross-validated against the
@@ -409,6 +436,12 @@ fixed default like every other caller (`synthetic/run_experiment.py`,
 `synthetic/anderson_tikhonov_n_sweep.py`). Verified robust across 10 random seeds locally
 (previously reproducible within a handful).
 
+**A real `fno` run against production data diverged catastrophically after this phase landed --
+see Section 12 for the root cause (a compounding score-network output-scale bias), the fix (a
+learnable per-task output gain on `FNOScoreNetwork`/`SongUNetScoreNetwork`), and the new
+stability-test methodology (`tests/test_pde_reverse_sde_stability.py`) written to catch this class
+of bug before spending real GPU time again.**
+
 ## 10. TE_heat eval fix: a held-out split carved from training
 
 `testing/TE_heat/mater/` is empty on the real Multiphysics-Bench release -- confirmed by direct
@@ -515,6 +548,106 @@ this normalization only affects our own training loss's internal representation,
 directly comparable to their reported numbers, the exact scheme doesn't need to match, only the
 structural principle (network output space is normalized; physics/metrics use denormalized raw
 units) does.
+
+## 12. FNO reverse-SDE divergence: root cause, output-gain fix, and stability-test methodology
+
+A real (non-smoke) `--score-arch fno` run against `TE_heat` (128x128, 9000 real samples,
+`n_diff_steps=20`, `dt=0.5`, `n_epochs=50`, `batch_size=64`, 5 seeds) produced
+`Re{Ez}_rel_l2`/`Im{Ez}_rel_l2`≈22-22.5 — the prediction's magnitude ~22x the true field's own
+norm — while the identical run under `--score-arch attention` worked correctly (`rel_l2`≈0.3).
+
+**Root cause.** `anderson_reverse_step_coupled_gamma` (`synthetic/anderson_sde.py`) is, for a
+linear-Gaussian process with a linear score, a **linear per-step recursion** whose feedback term
+is directly proportional to the score network's output. A systematic score-network output-scale
+bias `c` therefore compounds **geometrically** over the reverse rollout: `c^n_diff_steps`. Solving
+`c^20 ≈ 22.3` gives `c ≈ 1.167`, matching the observed divergence almost exactly and explaining its
+tight, nearly seed-independent spread (22.03-22.48 across 5 seeds) — a structural gain bias
+reproduces consistently across seeds, stochastic instability would not. `calibrate_coupled_gammas`
+(the deterministic drift/damping) depends only on `alpha, beta, k_reference, N, damping_regime` —
+identical for both architectures, and demonstrably stable under `attention` with the same numbers
+— so the deterministic integrator itself was ruled out. Training-time `explosion_events` stayed
+low (1-3/7000 steps) because a smooth-but-mis-scaled function doesn't trip a per-training-step
+gradient-norm threshold: the divergence only appears once you *integrate* the bias over 20
+`evaluate()`-time reverse steps, and `evaluate()` runs entirely under `@torch.no_grad()` with no
+backward pass — training-time diagnostics structurally cannot see it.
+
+Most likely source of the gain bias: `FNOScoreNetwork` (`pde/fno_score_net.py`) had **no
+output-scale-constraining mechanism** (no final activation/clamp/normalization — raw
+`neuralop.models.FNO` projection output) and, unlike `attention`, **no downstream `decode()` step
+to absorb drift** — `MultiPhysicsScoreNetwork` operates on `LayerNorm`-regularized attention
+tokens and its co-trained encoder/decoder can jointly compensate for whatever scale the latent
+settles at, while `SpatialFieldModel`'s `X0` is rigidly pinned to z-scored physical units (Section
+11) with zero decode-side freedom, so any score-network gain bias shows up in the reported metric
+completely undiluted. Secondary/contributing candidate: `n_modes=(12,12)` (the FNO's spectral
+truncation) is a strong low-pass architectural bias, while the DSM/Tikhonov score target
+(`sample_and_tikhonov_score_target`) is built with noise drawn i.i.d. **per pixel** — a target
+containing substantial per-pixel-independent (high-frequency) content a 12x12-mode spectral
+architecture cannot represent exactly, unlike `attention`'s compact, spatially-unstructured
+64-dim latent target.
+
+**Fix: learnable per-task output gain.** `FNOScoreNetwork`/`FlatFNOScoreNetwork`/
+`SongUNetScoreNetwork`/`FlatSongUNetScoreNetwork` each now have `self.output_gain =
+nn.Parameter(torch.ones(n_tasks))`, multiplied elementwise into the raw network output
+(`out * self.output_gain.view(1, -1, 1, 1)`) before it's returned. Initialized to `1.0`, so
+behavior at init is unchanged — this cannot make a currently-working configuration worse. Trained
+by ordinary backprop through the same Tikhonov/DSM loss already in place, letting the network
+self-correct a systematic scale bias via gradient descent, per-task (a single global scalar would
+be under-specified, since e.g. `T` was far less affected than `Ez` in the observed run).
+
+**Why the existing smoke-test suite couldn't catch this, and what does.** Every PDE smoke test
+(`tests/test_experiments_smoke.py`) runs at `--n-diff-steps 2` and asserted only `np.isfinite` —
+never a magnitude bound. `1.17^2≈1.37` at the smoke suite's step count is indistinguishable from
+ordinary undertrained-model error, vs. `1.17^20≈23.1` at the real grid's step count — **this bug
+was structurally unreachable by the smoke-test methodology, independent of any other gap**
+(dataset realism, batch size, epoch count). This repo's `synthetic/` module already has, and uses,
+the exact methodology needed: a **zero-score deterministic-drift stability test**
+(`synthetic/schedule_diagnostics.py::monte_carlo_probe` — force the score to zero and verify the
+reverse trajectory alone doesn't blow up; `writeup/csho_writeup.tex`'s own Verification section
+documents this exact technique catching an identical class of bug, unbounded multiplicative growth
+in an earlier, uncorrected reverse-SDE sign convention, in the original scalar CSHO design) and
+recalibrating at every step count rather than trusting a cached value from a different one
+(`synthetic/anderson_tikhonov_n_sweep.py`). None of this existed for `pde/`'s spatial (`fno`/
+`songunet`) reverse-sampling pathway before now.
+
+**`tests/test_pde_reverse_sde_stability.py`** ports this methodology to `pde/`, covering all 9
+`(score_arch, problem)` combinations (`{attention, fno, songunet} x {TE_heat, E_flow, VA}`) in one
+bundled script, each combination printing its own pass/fail line:
+1. **Zero-score round-trip** at the real production budget (`n_diff_steps=20, dt=0.5`): force
+   `score_outputs` to zero and assert the final/initial state-norm ratio stays under
+   `ZERO_SCORE_RATIO_BOUND=3.0`. Isolates "is the integrator itself stable for this
+   (gamma, alpha, beta, dt, k_reference, N) configuration" from "is the trained score good."
+2. **Step-count sweep** (`n_diff_steps ∈ {2, 4, 8, 16, 20}`): a small, freshly-trained-and-
+   recalibrated-per-step-count model (`STEP_SWEEP_N_TRAIN_STEPS=8` gradient steps) rolled out at
+   that same step count, asserting the final/initial state-norm ratio stays under
+   `STEP_SWEEP_RATIO_BOUND=3.0` at **every** step count, not just the smallest. `1.17^16≈12.3`
+   already clearly exceeds this bound well before reaching the real step count — this is the
+   check that would have directly caught the FNO divergence.
+3. **Realistic-scale synthetic fixture**, used by the step-count sweep (`_realistic_targets`): one
+   huge-scale task (~1e5, like `Ez`) and the rest tiny-scale/low-variance (~1e2, like `T`) at
+   32x32 resolution — reproduces the actual magnitude disparity (Section 11) that produced the
+   observed bug, rather than an easier pure-random-noise regime that happens to pass.
+4. **Magnitude assertions added to the existing local smoke suite**: every
+   `tests/test_experiments_smoke.py` PDE test now also asserts every `*_rel_l2` metric is `< 5.0`,
+   alongside the existing `np.isfinite` check — generous but meaningful (would have failed
+   instantly on the observed ~22x), so a regression of this class fails loudly in the fast,
+   existing suite too. One test (`test_experiment_2_physics_smoke_va_fno`) needed its
+   `--n-epochs` bumped from 1 to 10 to keep this bound meaningful rather than flaky: verified
+   locally that VA's 12 real/imag tasks pushed `max_rel_l2` to ~15 purely from being
+   undertrained-in-one-epoch (no divergence involved), dropping to ~3.5 by epoch 10.
+
+Meant to run on a GPU box, not a laptop — real FNO/SongUNet forward passes at `n_diff_steps` up to
+20 are slow on CPU (it does not need the real Multiphysics-Bench dataset, only compute speed):
+
+```
+python -m tests.test_pde_reverse_sde_stability
+```
+
+Local (fast, CPU-scale) verification before trusting this: `python -m tests.test_experiments_smoke`
+must still pass, including the new magnitude assertions — confirms the divisor fix (Section 8) and
+the output-gain fix didn't break anything at smoke scale before the heavier remote check. Only
+once `test_pde_reverse_sde_stability` passes on the remote box should a real `TE_heat`/`csho`/`fno`
+combo be re-verified at the real budget, before resuming the full 27-combo grid
+(`run_full_paper_sweep.sh`).
 
 ## Important notes
 
