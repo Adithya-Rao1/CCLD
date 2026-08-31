@@ -76,11 +76,10 @@ def _reverse_noise_injection_matrix(G: torch.Tensor, dt: float) -> torch.Tensor:
     return Nmat
 
 
-def roundtrip_leak_snr(
+def roundtrip_propagator(
     N: int, gamma_self: float, alpha: List[float], k_reference: float,
-    cov_data: torch.Tensor, T: int, dt: float, time_scale_fn, sigma_ref: float = 1.0,
-) -> float:
-    dtype = cov_data.dtype
+    T: int, dt: float, time_scale_fn, sigma_ref: float = 1.0, dtype=torch.float32,
+) -> Tuple[torch.Tensor, torch.Tensor]:
     beta_zero = [0.0] * N
     gamma_couple_zero = 0.0
     Phi = torch.eye(2 * N, dtype=dtype)
@@ -101,8 +100,16 @@ def roundtrip_leak_snr(
         Phi = M @ Phi
         Sigma = M @ Sigma @ M.T + Nmat @ Nmat.T
 
-    Phi_x = Phi[:N, :N]
-    cov_final_x = Phi_x @ cov_data @ Phi_x.T + Sigma[:N, :N]
+    return Phi[:N, :N], Sigma[:N, :N]
+
+
+def roundtrip_leak_snr(
+    N: int, gamma_self: float, alpha: List[float], k_reference: float,
+    cov_data: torch.Tensor, T: int, dt: float, time_scale_fn, sigma_ref: float = 1.0,
+) -> float:
+    Phi_x, Sigma_x = roundtrip_propagator(N, gamma_self, alpha, k_reference, T, dt, time_scale_fn,
+                                           sigma_ref=sigma_ref, dtype=cov_data.dtype)
+    cov_final_x = Phi_x @ cov_data @ Phi_x.T + Sigma_x
 
     def corr_matrix(cov: torch.Tensor) -> torch.Tensor:
         std = cov.diagonal().sqrt()
