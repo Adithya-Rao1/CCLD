@@ -22,7 +22,8 @@ def _ddy(field: torch.Tensor, ky: torch.Tensor) -> torch.Tensor:
 
 
 def pde_residual_metric(residual: torch.Tensor) -> float:
-    return residual.abs().pow(2).mean().item()
+    n = residual.shape[-2] * residual.shape[-1]
+    return (torch.norm(residual.flatten(1), 2, dim=1) / n).mean().item()
 
 
 E_FLOW_GRID = {"dx": 1.28e-3 / 128, "dy": 1.28e-3 / 128}

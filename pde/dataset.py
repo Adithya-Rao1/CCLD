@@ -216,6 +216,46 @@ def _get_or_create_held_out_split(problem_root: str, spec: Dict, problem: str) -
     return split
 
 
+_TARGET_NORM_STATS_DIR = os.path.join(os.path.dirname(__file__), "target_norm_stats")
+
+
+def _target_norm_stats_path(problem: str) -> str:
+    return os.path.join(_TARGET_NORM_STATS_DIR, f"{problem}_target_norm_stats.pt")
+
+
+def compute_target_norm_stats(dataset, task_names: List[str]) -> Dict[str, Dict[str, float]]:
+    sums = {name: 0.0 for name in task_names}
+    sumsqs = {name: 0.0 for name in task_names}
+    counts = {name: 0 for name in task_names}
+    for i in range(len(dataset)):
+        sample = dataset[i]
+        for name, field in zip(sample["task_names"], sample["tasks"]):
+            arr = field.double()
+            sums[name] += arr.sum().item()
+            sumsqs[name] += (arr ** 2).sum().item()
+            counts[name] += arr.numel()
+    stats = {}
+    for name in task_names:
+        mean = sums[name] / counts[name]
+        var = max(sumsqs[name] / counts[name] - mean ** 2, 1e-12)
+        stats[name] = {"mean": mean, "std": max(var ** 0.5, 1e-6)}
+    return stats
+
+
+def _get_or_create_target_norm_stats(dataset, problem: str, task_names: List[str]) -> Dict[str, Dict[str, float]]:
+    path = _target_norm_stats_path(problem)
+    key = {"task_names": sorted(task_names), "n_samples": len(dataset)}
+    if os.path.isfile(path):
+        cached = torch.load(path)
+        if cached.get("_key") == key:
+            return cached["stats"]
+    stats = compute_target_norm_stats(dataset, task_names)
+    if not os.path.isfile(path):
+        os.makedirs(_TARGET_NORM_STATS_DIR, exist_ok=True)
+        torch.save({"_key": key, "stats": stats}, path)
+    return stats
+
+
 def _find_h5_file(root_dir: str) -> str:
     candidates = sorted(glob.glob(os.path.join(root_dir, "**", "*diff-react*.h5"), recursive=True))
     if not candidates:

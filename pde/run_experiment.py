@@ -21,16 +21,14 @@ from core.stats import aggregate_over_seeds
 from synthetic.anderson_sde import anderson_em_step_coupled_gamma, anderson_reverse_step_coupled_gamma
 from synthetic.drift_coupled_gamma import calibrate_coupled_gammas
 from synthetic.exact_dsm import calibrate_sigma_for_leak, precompute_transition_params, sample_and_tikhonov_score_target
-from pde.dataset import ALL_PROBLEMS, MultiPhysicsFieldDataset, collate_fn
+from pde.dataset import ALL_PROBLEMS, MultiPhysicsFieldDataset, collate_fn, _get_or_create_target_norm_stats
 from pde.pde_residuals import e_flow_residual, pde_residual_metric, te_heat_normalize_mater, te_heat_residual, va_residual
 
 
+def _normalized_l1_loss(pred, target, mean: float, std: float):
+    return F.l1_loss((pred - mean) / std, (target - mean) / std)
+
 def _model_input_conditioning(args, batch, conditioning):
-    # TE_heat's 'mater' arrives in raw physical units (needed as-is by te_heat_residual); the
-    # network itself needs Multiphysics-Bench's own NN-input normalization (confirmed exactly via
-    # a real TE_heat sample, pde/pde_residuals.py::te_heat_normalize_mater), which this applies
-    # only to a copy fed to the model -- `conditioning`/`batch["conditioning"]` stay raw for the
-    # residual computation.
     if args.problem == "TE_heat":
         return te_heat_normalize_mater(conditioning[:, 0], batch["elliptic_params"]).unsqueeze(1)
     return conditioning
@@ -243,6 +241,10 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
     args.alpha_list = parse_float_list(args.alpha, N)
     args.beta_list = parse_float_list(args.beta, N)
 
+    target_norm_stats = _get_or_create_target_norm_stats(train_ds, args.problem, task_names)
+    target_mean = [target_norm_stats[name]["mean"] for name in task_names]
+    target_std = [target_norm_stats[name]["std"] for name in task_names]
+
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
                                num_workers=args.num_workers, collate_fn=collate_fn, drop_last=True)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
@@ -328,8 +330,8 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
             X, K_self, K_global, feat, y0 = _encode_state(args, model, task_names, model_conditioning, is_spatial)
 
             init_loss = torch.zeros((), device=device)
-            for name, y0_t, target in zip(task_names, [y0[n] for n in task_names], targets):
-                init_loss = init_loss + F.l1_loss(y0_t, target)
+            for name, y0_t, target, mean, std in zip(task_names, [y0[n] for n in task_names], targets, target_mean, target_std):
+                init_loss = init_loss + _normalized_l1_loss(y0_t, target, mean, std)
 
             t_idx = torch.randint(1, args.n_diff_steps + 1, (1,)).item()
 
@@ -353,9 +355,9 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
                     loss = init_loss + args.lambda_tikhonov * tikhonov
                 else:
                     readout_loss = torch.zeros((), device=device)
-                    for name, x, target in zip(task_names, X, targets):
+                    for name, x, target, mean, std in zip(task_names, X, targets, target_mean, target_std):
                         pred = model.decode(name, x[0])
-                        readout_loss = readout_loss + F.l1_loss(pred, target)
+                        readout_loss = readout_loss + _normalized_l1_loss(pred, target, mean, std)
                     loss = init_loss + readout_loss + args.lambda_tikhonov * tikhonov
             else:
                 X0_flat = [x[0] for x in X]
@@ -374,9 +376,9 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
                     loss = init_loss + args.lambda_tikhonov * diffusion_loss
                 else:
                     readout_loss = torch.zeros((), device=device)
-                    for name, x, target in zip(task_names, X, targets):
+                    for name, x, target, mean, std in zip(task_names, X, targets, target_mean, target_std):
                         pred = model.decode(name, x[0])
-                        readout_loss = readout_loss + F.l1_loss(pred, target)
+                        readout_loss = readout_loss + _normalized_l1_loss(pred, target, mean, std)
                     loss = init_loss + readout_loss + args.lambda_tikhonov * diffusion_loss
 
             optimizer.zero_grad()

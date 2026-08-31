@@ -174,13 +174,22 @@ into the problem's actual governing PDE and measure how much the equation is vio
 per equation as `{equation}_pde_residual` (e.g. `flow_continuity_pde_residual`,
 `acoustic_real_pde_residual`, `e_field_pde_residual`).
 
-**Metric definition**: DiffusionPDE's own evaluation formula (Huang et al., NeurIPS 2024,
-arXiv:2406.17763) — plain mean-squared PDE-operator residual over the spatial grid,
-`L_pde = mean(residual**2)`, no relative/reference normalization. This is deliberately *not*
-Multiphysics-Bench's internal PINN-training convention (`pde/multiphysics-bench/pinns/train_*.py`),
-which divides by arbitrary problem-specific constants and zeroes/clips boundary and outlier
-values purely for gradient-balancing during training — those are training-stability hacks, not a
-physically meaningful metric, and are deliberately dropped here.
+**Metric definition**: DiffusionPDE's own guidance-loss formula, verified against the actual
+source (identical across all five `generate_*.py` scripts —
+`generate_TE_heat.py`/`generate_E_flow.py`/`generate_NS_heat.py`/`generate_Elder.py`/
+`generate_VA.py`): `L_pde = ||residual||_2 / (H*W)` — the PDE-operator residual's L2 norm over the
+spatial grid, divided by pixel count, computed per sample then averaged over the batch
+(`pde_residual_metric`, `pde/pde_residuals.py`). **Corrected from an earlier version of this file
+and of `pde_residual_metric` that used `mean(residual**2)`** — that was never actually verified
+against DiffusionPDE's source, just assumed; this is neither MSE nor MAE, and DiffusionPDE itself
+has no MAE-style residual metric anywhere in its codebase (confirmed by full-repo grep) — its
+evaluation scripts (`evaluate_te_heat.py` etc.) don't call their own PDE-loss functions at all,
+reporting only RMSE/nRMSE/MaxError/bRMSE/fRMSE on field *values*, never on PDE residuals. This is
+deliberately *not* Multiphysics-Bench's internal PINN-training convention
+(`pde/multiphysics-bench/pinns/train_*.py`), which divides by arbitrary problem-specific constants
+and zeroes/clips boundary and outlier values purely for gradient-balancing during training — those
+are training-stability hacks, not a physically meaningful metric, and are deliberately dropped
+here.
 
 **Governing equations, constants, and grid spacing**, extracted from Multiphysics-Bench's own PINN
 loss code (`pinns/train_{te_heat,e_flow,VA}.py::get_*_loss`) and cross-validated against the
@@ -443,6 +452,47 @@ wholly-absent testing directory does *not* trigger this fallback).
 
 Only confirmed necessary for `TE_heat` so far; `E_flow`/`VA`'s testing splits have not been
 independently verified and may be fine as-is (the mechanism only activates when actually needed).
+
+## 11. Per-task target normalization (training-loss only)
+
+Every problem's output tasks span wildly different raw physical scales *within the same joint
+loss*, confirmed by direct inspection of the real data: `TE_heat`'s `Ez` has |value| mean
+~2.7e5 (std ~1.1e5) while its `T` has mean ~302.5 with std ~0.6 (its entire range across 20
+samples is 300.9–304.6 K); `E_flow`'s `ec_V` (mean ~25.8) vs `u_flow`/`v_flow` (mean ~±0.005) span
+~3 orders of magnitude; `VA`'s `x_u`/`x_v` (mean ~14–22, max ~500–770) vs `Sxx`/`Sxy`/`Syy` (mean
+~0.02–0.1) span ~4. None of the *output* target fields were normalized before this fix — only
+`TE_heat`'s *input* conditioning (`mater`, via `te_heat_normalize_mater`) was. In an unweighted
+per-task L1 sum (`init_loss`/`readout_loss` in `run_experiment.py`), the largest-scale task's loss
+term completely dominates the gradient, destabilizing the shared backbone. Confirmed on a real
+`TE_heat`/`csho`/`attention` run: `Re{Ez}`/`Im{Ez}` collapsed to `rel_l2`≈0.994 (suspiciously
+identical across all 4 seeds — the signature of a degenerate near-constant prediction, not "hard
+to learn"), with ~28–31% of training steps triggering the gradient-explosion detector (which is
+diagnostic-only and does not skip the optimizer step, so those huge-but-finite gradients were
+still being applied). `T`'s deceptively good `rel_l2`≈0.0015 is an artifact of its own near-zero
+dynamic range, not evidence of real learning.
+
+**Fix**: `pde/dataset.py::compute_target_norm_stats` streams the full training dataset once
+(exact, not a subsample) to compute an exact per-task z-score `(mean, std)`, cached to
+`pde/target_norm_stats/{problem}_target_norm_stats.pt` (`_get_or_create_target_norm_stats`, same
+caching philosophy as Section 10's held-out split — computed once, reused identically by every
+subsequent method/architecture/seed so the whole grid stays validly comparable; a key mismatch,
+e.g. a local smoke-test fixture, recomputes fresh in-memory without touching the persisted
+canonical file). `run_experiment.py::_normalized_l1_loss` applies `(x - mean)/std` to **both**
+sides of `init_loss` and `readout_loss` before computing L1 -- this only rescales each task's
+gradient contribution to be comparable in magnitude; it does not change what `y0`/`decode()`
+predict (still raw physical units throughout), so eval metrics (`rel_l2`/`spectral_l2`/
+`pde_residual`) and the DSM/Tikhonov score-matching pathway are completely unaffected and required
+no changes.
+
+**Deliberately not matching Multiphysics-Bench's own convention.** Their PINN training scripts
+(`pinns/train_{te_heat,e_flow,VA}.py::compute_loss`) normalize the same way for the same reason,
+but with a different scheme: min-max scaling to `[-0.9, 0.9]` (per-task, from precomputed range
+files they ship and we don't have) for essentially everything, with `TE_heat`'s complex `Ez` field
+specifically using symmetric abs-max scaling shared across its Re/Im pair to preserve phase (`VA`'s
+6 complex fields, by contrast, min-max each real/imag channel independently, same as everything
+else). Z-score is used here instead -- since this normalization only rescales our own training
+loss's internal gradient balance, not anything directly comparable to their reported numbers, it
+doesn't need to match exactly.
 
 ## Important notes
 
