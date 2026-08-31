@@ -215,7 +215,7 @@ def _build_score_fns(args, score_net, conditioning):
     return make_score_fn(score_net, conditioning), make_flat_score_fn(score_net, conditioning)
 
 
-def _calibrate_csho_sigma(model, train_loader, N: int, gamma_self: float, gamma_couple: float,
+def _calibrate_csho_sigma(model, train_loader, N: int, gamma_self: float,
                            args: argparse.Namespace, device, task_names, is_spatial: bool) -> float:
     batch = next(iter(train_loader))
     conditioning = batch["conditioning"].to(device)
@@ -227,7 +227,7 @@ def _calibrate_csho_sigma(model, train_loader, N: int, gamma_self: float, gamma_
     X_flat = torch.cat([X[i][0].reshape(-1, 1) for i in range(N)], dim=-1).detach().cpu()
     cov_data = torch.cov(X_flat.T)
     return calibrate_sigma_for_leak(
-        N, gamma_self, gamma_couple, args.alpha_list, args.k_reference, cov_data,
+        N, gamma_self, args.alpha_list, args.k_reference, cov_data,
         args.n_diff_steps, args.dt, None, leak_fraction=args.leak_fraction,
     )
 
@@ -304,7 +304,7 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
     )
 
     if is_csho:
-        sigma = _calibrate_csho_sigma(model, train_loader, N, gamma_self, gamma_couple, args, device,
+        sigma = _calibrate_csho_sigma(model, train_loader, N, gamma_self, args, device,
                                        task_names, is_spatial)
         state = build_method_state(args, N, device, sigma=sigma)
         coupling = state["coupling"]

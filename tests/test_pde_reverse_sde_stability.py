@@ -85,13 +85,13 @@ def _build_model_and_score_net(score_arch: str, task_names: List[str], n_diff_st
     return model, score_net, is_spatial
 
 
-def _calibrate_sigma(model, conditioning, N, gamma_self, gamma_couple, args, device, task_names, is_spatial) -> float:
+def _calibrate_sigma(model, conditioning, N, gamma_self, args, device, task_names, is_spatial) -> float:
     with torch.no_grad():
         X, _, _, _, _ = _encode_state(args, model, task_names, conditioning, is_spatial)
     X_flat = torch.cat([X[i][0].reshape(-1, 1) for i in range(N)], dim=-1).detach().cpu()
     cov_data = torch.cov(X_flat.T)
     return calibrate_sigma_for_leak(
-        N, gamma_self, gamma_couple, args.alpha_list, args.k_reference, cov_data,
+        N, gamma_self, args.alpha_list, args.k_reference, cov_data,
         args.n_diff_steps, args.dt, None, leak_fraction=args.leak_fraction,
     )
 
@@ -122,7 +122,7 @@ def zero_score_round_trip(score_arch: str, problem: str, device) -> Dict[str, fl
         args.alpha_list[0], args.beta_list[0], args.k_reference, args.k_reference, N,
         regime=args.damping_regime, target_zeta=args.target_zeta,
     )
-    sigma = _calibrate_sigma(model, conditioning, N, gamma_self, gamma_couple, args, device, task_names, is_spatial)
+    sigma = _calibrate_sigma(model, conditioning, N, gamma_self, args, device, task_names, is_spatial)
     state = build_method_state(args, N, device, sigma=sigma)
     cfg, coupling, g_per_task = state["cfg"], state["coupling"], state["g_per_task"]
     G = build_g_matrix_n(
@@ -169,7 +169,7 @@ def _train_csho_briefly(score_arch: str, problem: str, n_diff_steps: int, dt: fl
     target_std = [t.std().clamp_min(1e-6) for t in targets]
     targets_norm = [(t - m) / s for t, m, s in zip(targets, target_mean, target_std)]
 
-    sigma = _calibrate_sigma(model, conditioning, N, gamma_self, gamma_couple, args, device, task_names, is_spatial)
+    sigma = _calibrate_sigma(model, conditioning, N, gamma_self, args, device, task_names, is_spatial)
     state = build_method_state(args, N, device, sigma=sigma)
     coupling = state["coupling"]
     params = precompute_transition_params(

@@ -35,11 +35,11 @@ _sigma_cache: Dict[Tuple[int, int], float] = {}
 def _get_sigma_n(N: int) -> float:
     key = (N, N_DIFF_STEPS)
     if key not in _sigma_cache:
-        gamma_self_dc, gamma_couple_dc = calibrate_coupled_gammas(ALPHA_V, 0.0, K_REFERENCE, K_REFERENCE, N, target_zeta=TARGET_ZETA)
+        gamma_self_dc, _ = calibrate_coupled_gammas(ALPHA_V, 0.0, K_REFERENCE, K_REFERENCE, N, target_zeta=TARGET_ZETA)
         gt_ref = make_ground_truth(N, COUPLING_STRENGTH, seed=0, base_decay=1.0, sigma_scale=1.0)
         cov_data = gt_ref.stationary_covariance()
         _sigma_cache[key] = calibrate_sigma_for_leak(
-            N, gamma_self_dc, gamma_couple_dc, [ALPHA_V] * N, K_REFERENCE, cov_data,
+            N, gamma_self_dc, [ALPHA_V] * N, K_REFERENCE, cov_data,
             N_DIFF_STEPS, DT, TIME_SCALE_FN, leak_fraction=LEAK_FRACTION,
         )
     return _sigma_cache[key]

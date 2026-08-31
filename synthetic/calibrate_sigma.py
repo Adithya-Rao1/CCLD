@@ -16,11 +16,11 @@ TIME_SCALE_FN = _vp_linear_time_scale
 
 
 def calibrate(N: int, n_diff_steps: int, dt: float, coupling_strength: float, leak_fraction: float, gt_seed: int) -> float:
-    gamma_self, gamma_couple = calibrate_coupled_gammas(ALPHA_V, 0.0, K_REFERENCE, K_REFERENCE, N, target_zeta=TARGET_ZETA)
+    gamma_self, _ = calibrate_coupled_gammas(ALPHA_V, 0.0, K_REFERENCE, K_REFERENCE, N, target_zeta=TARGET_ZETA)
     gt = make_ground_truth(N, coupling_strength, seed=gt_seed, base_decay=1.0, sigma_scale=1.0)
     cov_data = gt.stationary_covariance()
     return calibrate_sigma_for_leak(
-        N, gamma_self, gamma_couple, [ALPHA_V] * N, K_REFERENCE, cov_data,
+        N, gamma_self, [ALPHA_V] * N, K_REFERENCE, cov_data,
         n_diff_steps, dt, TIME_SCALE_FN, leak_fraction=leak_fraction,
     )
 

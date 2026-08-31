@@ -644,10 +644,55 @@ python -m tests.test_pde_reverse_sde_stability
 
 Local (fast, CPU-scale) verification before trusting this: `python -m tests.test_experiments_smoke`
 must still pass, including the new magnitude assertions — confirms the divisor fix (Section 8) and
-the output-gain fix didn't break anything at smoke scale before the heavier remote check. Only
-once `test_pde_reverse_sde_stability` passes on the remote box should a real `TE_heat`/`csho`/`fno`
-combo be re-verified at the real budget, before resuming the full 27-combo grid
-(`run_full_paper_sweep.sh`).
+the output-gain fix didn't break anything at smoke scale before the heavier remote check.
+
+**Update: a second, larger root cause found while running this harness for the first time —
+`--dt` was violating the `T_max=1.0` invariant `drift_fn_coupled_gamma`'s time_scale schedule
+assumes.** Running the zero-score/step-sweep tiers above surfaced that even `attention` (already
+known to work in production) diverges on the *deterministic* drift alone (no score, no noise) at
+`pde/run_experiment.py`'s real config, `n_diff_steps=20` with `--dt` defaulting to a fixed `0.5`
+independent of `n_diff_steps` (`dt*n_diff_steps=10`) — isolated with a direct sweep: stable
+(ratio≈0.19-0.87) at every tested `(dt, n_diff_steps)` pair with `dt*n_diff_steps` near `1.0`,
+diverging (ratio≈9-40x) as that product grows past it. `synthetic/anderson_tikhonov_n_sweep.py`
+already documents and enforces the correct convention (`--dt` defaults to `1/n_diff_steps`,
+holding `n_diff_steps*dt` fixed at `1.0` as `n_diff_steps` varies) — `pde/run_experiment.py`'s
+`--dt` (default `0.5`, independent of `n_diff_steps`) and `pde/ablations.py`'s own separate `--dt`
+forwarding (same default, unconditionally passed through) never adopted it. `run_full_paper_sweep.sh`
+passes `--n-diff-steps 20` without overriding `--dt`, silently landing on `dt*n_diff_steps=10` —
+confirmed via a direct diagnostic to make the deterministic drift alone diverge ~40x before any
+score network is even involved. **Fixed**: both files' `--dt` now default to `None`, resolved to
+`1/n_diff_steps` (`pde/run_experiment.py::parse_args`) or left unset so `run_experiment.py`'s own
+resolution applies (`pde/ablations.py::base_argv`, only forwards `--dt` when explicitly overridden).
+Re-verified with the same isolated deterministic-drift sweep: `dt=0.05, n_diff_steps=20`
+(the corrected default) now gives ratio≈0.76, stable. `python -m tests.test_experiments_smoke`
+still passes unchanged (every smoke test uses `--n-diff-steps 2`, which already satisfied
+`dt*n_diff_steps=1.0` under the old default by coincidence, so this fix is invisible there).
+
+This does not fully explain the original FNO divergence by itself (that investigation's
+compounding score-output-gain-bias diagnosis and the Fix 2 output-gain parameter both stand), but
+it means the underlying integrator was *also* running outside its valid regime on the real grid,
+compounding with any score-network imperfection — likely part of why `attention`'s real result
+(`rel_l2`≈0.3) still worked (a fully-converged 50-epoch score learned to compensate) while FNO's
+much larger, more architecture-specific bias did not.
+
+**`tests/test_pde_reverse_sde_stability.py` is paused, not finished.** Building it is what
+surfaced the `dt` bug above, but the script's own zero-score/step-sweep bounds (`ZERO_SCORE_RATIO_BOUND`,
+`STEP_SWEEP_RATIO_BOUND`) were tuned against the broken `dt=0.5` config and have **not** been
+re-validated against the corrected `dt=1/n_diff_steps` default, nor against a properly-converged
+(not `STEP_SWEEP_N_TRAIN_STEPS=8`) trained score — a locally-trained-for-400-steps diagnostic still
+diverged to `inf`/`nan` even after the `dt` fix, suggesting the step-sweep tier's premise (a cheap,
+briefly-trained local/remote proxy standing in for a full 50-epoch run) may not be achievable for
+this drift formulation at all. Left as-is pending further investigation, not deleted.
+
+**Separately flagged, not yet confirmed on real data**: `synthetic/exact_dsm.py::calibrate_sigma_for_leak`
+computes `(k / snr_target) ** 0.5` with no guard against a negative base — if `cov_data`'s mean
+pairwise task correlation is non-positive, this silently returns a **complex** Python number, which
+downstream code (`torch.tensor(sigma, ...)` feeding `build_g_matrix_n`) silently truncates to its
+near-zero real part (the `Casting complex values to real discards the imaginary part` warning some
+runs print). Reproduced in 6/6 diagnostic runs using this harness's synthetic (randomly-initialized
+encoder) fixtures, but not yet checked against real encoded training data -- `E_flow`'s documented
+unidirectional coupling (Section 8's "falsification case") is the most plausible real candidate.
+Not fixed yet; investigate against real data before deciding whether to guard it.
 
 ## Important notes
 
