@@ -104,15 +104,19 @@ def roundtrip_leak_snr(
     Phi_x = Phi[:N, :N]
     cov_final_x = Phi_x @ cov_data @ Phi_x.T + Sigma[:N, :N]
 
-    def mean_pairwise_corr(cov: torch.Tensor) -> float:
+    def corr_matrix(cov: torch.Tensor) -> torch.Tensor:
         std = cov.diagonal().sqrt()
-        corr = cov / (std[:, None] * std[None, :])
-        off = corr - torch.diag(torch.diag(corr))
-        return off.sum().item() / (N * (N - 1))
+        return cov / (std[:, None] * std[None, :])
 
-    rho_true = mean_pairwise_corr(cov_data)
-    rho_leak = mean_pairwise_corr(cov_final_x)
-    x = rho_leak / rho_true
+    off_mask = ~torch.eye(N, dtype=torch.bool)
+    corr_true_off = corr_matrix(cov_data)[off_mask]
+    corr_leak_off = corr_matrix(cov_final_x)[off_mask]
+
+    eps = 1e-6
+    valid = corr_true_off.abs() >= eps
+    if not torch.any(valid):
+        return 0.0
+    x = (corr_leak_off[valid] / corr_true_off[valid]).mean().item()
     return x / (1 - x)
 
 
