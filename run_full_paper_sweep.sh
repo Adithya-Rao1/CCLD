@@ -45,6 +45,11 @@ PDE_N_EPOCHS=50
 PDE_N_DIFF_STEPS=20
 PDE_BATCH_SIZE=64
 PDE_SEEDS="0,1,2,3,4"
+declare -A PDE_LR=(
+  [attention]="0.001"
+  [fno]="0.001"
+  [songunet]="0.001"
+)
 
 for PROBLEM in "${PROBLEMS[@]}"; do
   for ARCH in "${ARCHES[@]}"; do
@@ -56,7 +61,7 @@ for PROBLEM in "${PROBLEMS[@]}"; do
         echo "--- ${PROBLEM} / ${METHOD} / ${ARCH}: already present at ${RESULT_FILE}, skipping ---"
         continue
       fi
-      echo "--- ${PROBLEM} / ${METHOD} / ${ARCH}: training ---"
+      echo "--- ${PROBLEM} / ${METHOD} / ${ARCH}: training (lr=${PDE_LR[${ARCH}]}) ---"
       python -m pde.run_experiment \
         --config pde/config.yaml \
         --data-root "${PDE_DATA_ROOT}" \
@@ -67,6 +72,7 @@ for PROBLEM in "${PROBLEMS[@]}"; do
         --n-diff-steps "${PDE_N_DIFF_STEPS}" \
         --batch-size "${PDE_BATCH_SIZE}" \
         --seeds "${PDE_SEEDS}" \
+        --lr "${PDE_LR[${ARCH}]}" \
         --out-dir "${OUT_DIR}" \
         || echo "!!! FAILED: ${PROBLEM} / ${METHOD} / ${ARCH} -- see output above, continuing with the rest of the grid !!!"
     done
