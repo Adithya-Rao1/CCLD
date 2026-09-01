@@ -8,7 +8,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
 
 ARCHES=(fno songunet)
-LRS=(0.0003 0.001 0.003)
+LRS=(0.00001)
 
 echo "############################################################"
 echo "### LR sanity check: TE_heat/csho/{fno,songunet}         ###"
@@ -44,7 +44,7 @@ import json, os, glob
 
 rows = []
 for arch in ['fno', 'songunet']:
-    for lr in ['0.0003', '0.001', '0.003']:
+    for lr in ['0.00001', '0.0003', '0.001', '0.003']:
         path = f'results/lr_sanity_check/TE_heat_csho_{arch}_lr{lr}/csho_results.json'
         if not os.path.exists(path):
             rows.append((arch, lr, None))
