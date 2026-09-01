@@ -130,6 +130,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--num-workers", type=int, default=2)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--out-dir", default="results/experiment_2_physics")
+    p.add_argument("--debug-rollout", action="store_true",
+                    help="print trained score_net.output_gain (if present) and the CSHO reverse "
+                         "rollout's per-step state norm for the first eval batch -- diagnostic "
+                         "for isolating where a reverse-SDE divergence originates")
     return p
 
 
@@ -226,10 +230,19 @@ def _calibrate_csho_sigma(model, train_loader, N: int, gamma_self: float,
         X, _, _, _, _ = _encode_state(args, model, task_names, model_conditioning, is_spatial)
     X_flat = torch.cat([X[i][0].reshape(-1, 1) for i in range(N)], dim=-1).detach().cpu()
     cov_data = torch.cov(X_flat.T)
-    return calibrate_sigma_for_leak(
+    sigma = calibrate_sigma_for_leak(
         N, gamma_self, args.alpha_list, args.k_reference, cov_data,
         args.n_diff_steps, args.dt, None, leak_fraction=args.leak_fraction,
     )
+    if args.debug_rollout:
+        std = cov_data.diagonal().clamp_min(1e-12).sqrt()
+        corr = cov_data / (std[:, None] * std[None, :])
+        off = corr - torch.diag(torch.diag(corr))
+        rho_true = off.sum().item() / (N * (N - 1))
+        print(f"[debug-rollout] cov_data diag (per-task variance) = {dict(zip(task_names, std.pow(2).tolist()))}")
+        print(f"[debug-rollout] cov_data mean pairwise corr (rho_true) = {rho_true:.6f}")
+        print(f"[debug-rollout] calibrated sigma = {sigma}")
+    return sigma
 
 
 def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
@@ -403,6 +416,10 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
                 nan_events += 1
             n_steps += 1
 
+    if args.debug_rollout and hasattr(score_net, "output_gain"):
+        gain = score_net.output_gain.detach().cpu().tolist()
+        print(f"[debug-rollout] trained output_gain per task ({list(zip(task_names, gain))})")
+
     metrics = evaluate(args, model, score_net, val_loader, device, task_names, state, gamma_self, gamma_couple,
                         is_spatial, target_mean, target_std)
     metrics["nan_events"] = float(nan_events)
@@ -422,6 +439,7 @@ def evaluate(args, model, score_net, val_loader, device, task_names, state, gamm
     sums: Dict[str, float] = {}
     counts: Dict[str, int] = {}
     rollout_errs: List[List[float]] = []
+    first_batch = True
 
     for batch in val_loader:
         conditioning = batch["conditioning"].to(device)
@@ -438,8 +456,14 @@ def evaluate(args, model, score_net, val_loader, device, task_names, state, gamm
             G = build_g_matrix_n(torch.tensor(sigma, device=device), N, diffusion_mode=cfg["diffusion_mode"],
                                   g_per_task=g_per_task, coupling_matrix=coupling if cfg["diffusion_mode"] == "independent" else None)
             score_fn, _ = _build_score_fns(args, score_net, feat)
+            debug_this_batch = args.debug_rollout and first_batch
             for t_idx in reversed(range(1, args.n_diff_steps + 1)):
                 score_outputs = score_fn(X_cur, V_cur, t_idx)
+                if debug_this_batch:
+                    x_norms = [round(X_cur[i][0].flatten(1).norm(dim=1).mean().item(), 4) for i in range(N)]
+                    score_norms = [round(score_outputs[i][0].flatten(1).norm(dim=1).mean().item(), 4) for i in range(N)]
+                    print(f"[debug-rollout] t_idx={t_idx:3d}  X_norm={dict(zip(task_names, x_norms))}  "
+                          f"score_norm={dict(zip(task_names, score_norms))}")
                 X_cur, V_cur = anderson_reverse_step_coupled_gamma(
                     X_cur, V_cur, K_self, K_global, score_outputs, t_idx, args.n_diff_steps,
                     args.alpha_list, args.beta_list, gamma_self, gamma_couple,
@@ -518,6 +542,8 @@ def evaluate(args, model, score_net, val_loader, device, task_names, state, gamm
                 errs = [relative_l2_error(preds[step * n_f + f], targets[step * n_f + f]) for f in range(n_f)]
                 per_step.append(sum(errs) / n_f)
             rollout_errs.append(per_step)
+
+        first_batch = False
 
     metrics = {k: sums[k] / counts[k] for k in sums}
     if rollout_errs:

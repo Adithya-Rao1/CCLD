@@ -684,15 +684,48 @@ diverged to `inf`/`nan` even after the `dt` fix, suggesting the step-sweep tier'
 briefly-trained local/remote proxy standing in for a full 50-epoch run) may not be achievable for
 this drift formulation at all. Left as-is pending further investigation, not deleted.
 
-**Separately flagged, not yet confirmed on real data**: `synthetic/exact_dsm.py::calibrate_sigma_for_leak`
-computes `(k / snr_target) ** 0.5` with no guard against a negative base — if `cov_data`'s mean
-pairwise task correlation is non-positive, this silently returns a **complex** Python number, which
-downstream code (`torch.tensor(sigma, ...)` feeding `build_g_matrix_n`) silently truncates to its
-near-zero real part (the `Casting complex values to real discards the imaginary part` warning some
-runs print). Reproduced in 6/6 diagnostic runs using this harness's synthetic (randomly-initialized
-encoder) fixtures, but not yet checked against real encoded training data -- `E_flow`'s documented
-unidirectional coupling (Section 8's "falsification case") is the most plausible real candidate.
-Not fixed yet; investigate against real data before deciding whether to guard it.
+**Update: the complex-sigma risk flagged above is now fixed and verified, not open.**
+`synthetic/exact_dsm.py::roundtrip_leak_snr`/`calibrate_sigma_for_leak` no longer take a
+`gamma_couple` argument (always fully decoupled internally now -- see
+`writeup/csho_writeup.tex` Appendix, Theorem "task decoupling," for the full proof this rests
+on) and compute the correlation-leak ratio elementwise (Hadamard: average the per-pair ratio
+`rho_leak_ij/rho_true_ij`, each provably in `(0,1]`) rather than as a ratio of two aggregated
+sums, which is what let mixed-sign pairwise correlations escape the intended `(0,1)` range
+before. Verified with `tests/investigate_complex_sigma_bug.py`: 0% complex sigma across every
+tested configuration, including a deliberately adversarial mixed-sign/heterogeneous-variance
+stress test (`N=3,12`, `realized_rho_true` swept from `-0.37` to `+0.83`).
+
+**Update, and the actual root cause of a real (not synthetic-fixture) `TE_heat`/`csho`/`fno`
+divergence that reproduced this same ~22x number after every fix above was already verified
+working**: `pde/config.yaml` had a stale `dt: 0.5` (paired with a stale `n_diff_steps: 2`),
+left over from *before* the `dt`/`T_max=1.0` fix (this section's original root-cause finding,
+"Update: a second, larger root cause found..." above). `parse_args`'s config loading
+(`parser.set_defaults(**load_config_defaults(...))`) overrides the argparse default for `--dt`
+from `None` to whatever the config says *whenever `--dt` isn't passed explicitly on the command
+line* -- which every real invocation in this project does (`run_full_paper_sweep.sh`'s PDE
+phase included). So `args.dt` was never actually `None` when a real run used `--config
+pde/config.yaml`, and the `if args.dt is None: args.dt = 1.0/args.n_diff_steps` auto-derivation
+never fired -- silently reintroducing the exact `dt=0.5, n_diff_steps=20` (`T_max=10`) broken
+configuration the fix was supposed to eliminate. This was invisible to every local test in this
+repo, since none of them load `pde/config.yaml` (they build `args` directly via `parse_args`
+with explicit flags only) -- only real runs using `--config` ever exercised the bug.
+
+Diagnosed via a `--debug-rollout` CLI flag (`pde/run_experiment.py`, prints the trained
+`score_net.output_gain`, `cov_data`'s realized `rho_true` and calibrated `sigma`, and the CSHO
+reverse rollout's per-step `X_norm`/`score_norm` for the first eval batch) added specifically to
+debug this incident. It ruled out every other hypothesis in order: the calibrated `sigma`
+(`~0.0036`) was tiny, not large, so noise injection (`Σ=GGᵀ≈1.3e-5`) was numerically negligible
+-- the score's own contribution to each reverse step was too small to be the driver; `output_gain`
+converged to plausible values (`0.45`-`0.70`), not something degenerate; and, most tellingly,
+`--score-arch fno` and `--score-arch songunet` (two independently-trained, architecturally
+unrelated networks) produced **nearly identical** `X_norm` trajectories step-for-step
+(`t=4`: `597/579/653` vs `599/573/657`; `t=1`: `1026/997/1033` vs `1034/989/1042`) -- ruling out
+anything specific to either network's learned weights or time-conditioning mechanism, and
+pointing at something architecture-independent (i.e. the deterministic integrator config)
+instead. `pde/config.yaml`'s `dt`/`sigma` keys are removed (letting `parse_args`'s own
+auto-derivation and dynamic calibration apply); `lambda_ndsm` was already a dead key (no matching
+`--lambda-ndsm` flag exists -- `--lambda-tikhonov`'s dest is `lambda_tikhonov`) and is harmless
+but was not cleaned up.
 
 ## Important notes
 
