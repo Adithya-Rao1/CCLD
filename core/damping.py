@@ -5,7 +5,7 @@ from typing import List, Literal, Optional, Tuple
 
 import torch
 
-from core.drift import _mean_frob_norm
+from core.drift import _mean_frob_norm, _time_scale
 
 DampingRegime = Literal["underdamped", "critically_damped", "overdamped"]
 
@@ -62,7 +62,7 @@ def realized_k_i(K_self_i: List[torch.Tensor], K_global: List[torch.Tensor], t: 
     if constant_k:
         norm_global = torch.as_tensor(1.0)
     else:
-        time_scale = (T - t) / (t + T)
+        time_scale = _time_scale(t, T)
         norm_global = time_scale * _mean_frob_norm(K_global)
     return float((norm_self + norm_global).item())
 

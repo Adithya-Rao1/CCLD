@@ -30,6 +30,13 @@ def _broadcast_per_sample(v: torch.Tensor, like: torch.Tensor) -> torch.Tensor:
     return v.view(v.shape[0], *([1] * (like.ndim - 1)))
 
 
+def _time_scale(
+    t: torch.Tensor, T: int, time_scale_fn: Optional[Callable[[torch.Tensor, int], torch.Tensor]] = None,
+) -> torch.Tensor:
+    raw = time_scale_fn(t, T) if time_scale_fn is not None else (T - t) / (t + T)
+    return torch.as_tensor(raw)
+
+
 def drift_fn_n(
     X: List[List[torch.Tensor]],
     V: List[List[torch.Tensor]],
@@ -54,7 +61,7 @@ def drift_fn_n(
 
     if coupling_matrix is None:
         coupling_matrix = build_coupling_matrix(N, mode="mean_field", device=X[0][0].device, dtype=torch.float32)
-    time_scale = time_scale_fn(t, T) if time_scale_fn is not None else (T - t) / (t + T)
+    time_scale = _time_scale(t, T, time_scale_fn)
 
     norm_f_k_self = [_mean_frob_norm(K_self[i]) for i in range(N)]
 

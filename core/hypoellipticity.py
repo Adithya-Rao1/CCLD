@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from scipy.linalg import expm, solve_continuous_lyapunov
 
-from core.drift import drift_fn_n
+from core.drift import _time_scale, drift_fn_n
 
 
 def _flatten_state(X: List[List[torch.Tensor]], V: List[List[torch.Tensor]]) -> torch.Tensor:
@@ -38,8 +38,11 @@ def linearize_drift(
     shape: Tuple[int, ...] = (2, 2),
     scale_damping_with_time: bool = True,
     time_scale_fn: Optional[Callable[[torch.Tensor, int], torch.Tensor]] = None,
+    scale_kinematics_with_time: bool = True,
 ) -> Tuple[np.ndarray, int]:
     n = int(torch.zeros(shape).numel())
+    time_scale = _time_scale(t, T, time_scale_fn)
+    kin_scale = time_scale if scale_kinematics_with_time else torch.as_tensor(1.0)
 
     def f(z: torch.Tensor) -> torch.Tensor:
         X, V = _unflatten_state(z, N, shape, n)
@@ -48,7 +51,7 @@ def linearize_drift(
             coupling_matrix=coupling_matrix, use_gamma=use_gamma, constant_k=constant_k,
             scale_damping_with_time=scale_damping_with_time, time_scale_fn=time_scale_fn,
         )
-        dX = [V[i][0].reshape(-1) for i in range(N)]
+        dX = [kin_scale * V[i][0].reshape(-1) for i in range(N)]
         dV_flat = [dV[i][0].reshape(-1) for i in range(N)]
         return torch.cat(dX + dV_flat)
 
@@ -106,11 +109,17 @@ def hypoellipticity_check(
     tol: float = 1e-8,
     scale_damping_with_time: bool = True,
     time_scale_fn: Optional[Callable[[torch.Tensor, int], torch.Tensor]] = None,
+    scale_kinematics_with_time: bool = True,
+    scale_diffusion_with_time: bool = True,
 ) -> Dict:
     A, n = linearize_drift(
         N, K_self, K_global, t, T, alpha, beta, gamma, coupling_matrix, use_gamma, constant_k, shape,
         scale_damping_with_time=scale_damping_with_time, time_scale_fn=time_scale_fn,
+        scale_kinematics_with_time=scale_kinematics_with_time,
     )
+    if scale_diffusion_with_time:
+        time_scale = _time_scale(t, T, time_scale_fn)
+        G = G * time_scale.clamp_min(0).sqrt()
     B = build_B_matrix(G, N, n)
     passed, min_eig, eigvals = controllability_check(A, B, tol)
     return {"passed": passed, "min_eig": min_eig, "eigvals": eigvals, "A": A, "B": B, "N": N, "n": n}
