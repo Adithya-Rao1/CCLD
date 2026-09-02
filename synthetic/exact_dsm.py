@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from typing import List, Tuple
+import math
+from typing import List, Optional, Tuple
 
 import torch
 
+from core.drift import _time_scale
 from synthetic.drift_coupled_gamma import drift_fn_coupled_gamma
 
 def _extract_Avx_Avv_coupled_gamma(
@@ -36,42 +38,42 @@ def _extract_Avx_Avv_coupled_gamma(
     return A_vx, A_vv
 
 
-def _forward_step_matrix(A_vx: torch.Tensor, A_vv: torch.Tensor, dt: float) -> torch.Tensor:
+def _forward_step_matrix(A_vx: torch.Tensor, A_vv: torch.Tensor, dt: float, time_scale=1.0) -> torch.Tensor:
     Nd = A_vx.shape[0]
     I = torch.eye(Nd, device=A_vx.device)
     M = torch.zeros(2 * Nd, 2 * Nd, device=A_vx.device)
-    M[:Nd, :Nd] = I + dt**2 * A_vx
-    M[:Nd, Nd:] = dt * (I + dt * A_vv)
+    M[:Nd, :Nd] = I + time_scale * dt**2 * A_vx
+    M[:Nd, Nd:] = time_scale * dt * (I + dt * A_vv)
     M[Nd:, :Nd] = dt * A_vx
     M[Nd:, Nd:] = I + dt * A_vv
     return M
 
 
-def _noise_injection_matrix(G: torch.Tensor, dt: float) -> torch.Tensor:
+def _noise_injection_matrix(G: torch.Tensor, dt: float, time_scale=1.0) -> torch.Tensor:
     Nd = G.shape[0]
     sqrt_dt = dt**0.5
     Nmat = torch.zeros(2 * Nd, Nd, device=G.device)
-    Nmat[:Nd, :] = dt * sqrt_dt * G
+    Nmat[:Nd, :] = time_scale * dt * sqrt_dt * G
     Nmat[Nd:, :] = sqrt_dt * G
     return Nmat
 
 
-def _reverse_step_matrix(A_vx: torch.Tensor, A_vv: torch.Tensor, dt: float) -> torch.Tensor:
+def _reverse_step_matrix(A_vx: torch.Tensor, A_vv: torch.Tensor, dt: float, time_scale=1.0) -> torch.Tensor:
     Nd = A_vx.shape[0]
     I = torch.eye(Nd, device=A_vx.device, dtype=A_vx.dtype)
     M = torch.zeros(2 * Nd, 2 * Nd, device=A_vx.device, dtype=A_vx.dtype)
-    M[:Nd, :Nd] = I + dt**2 * A_vx
-    M[:Nd, Nd:] = -dt * (I - dt * A_vv)
+    M[:Nd, :Nd] = I + time_scale * dt**2 * A_vx
+    M[:Nd, Nd:] = -time_scale * dt * (I - dt * A_vv)
     M[Nd:, :Nd] = -dt * A_vx
     M[Nd:, Nd:] = I - dt * A_vv
     return M
 
 
-def _reverse_noise_injection_matrix(G: torch.Tensor, dt: float) -> torch.Tensor:
+def _reverse_noise_injection_matrix(G: torch.Tensor, dt: float, time_scale=1.0) -> torch.Tensor:
     Nd = G.shape[0]
     sqrt_dt = dt**0.5
     Nmat = torch.zeros(2 * Nd, Nd, device=G.device, dtype=G.dtype)
-    Nmat[:Nd, :] = -dt * sqrt_dt * G
+    Nmat[:Nd, :] = -time_scale * dt * sqrt_dt * G
     Nmat[Nd:, :] = sqrt_dt * G
     return Nmat
 
@@ -79,24 +81,31 @@ def _reverse_noise_injection_matrix(G: torch.Tensor, dt: float) -> torch.Tensor:
 def roundtrip_propagator(
     N: int, gamma_self: float, alpha: List[float], k_reference: float,
     T: int, dt: float, time_scale_fn, sigma_ref: float = 1.0, dtype=torch.float32,
+    scale_kinematics_with_time: bool = True, scale_diffusion_with_time: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     beta_zero = [0.0] * N
     gamma_couple_zero = 0.0
     Phi = torch.eye(2 * N, dtype=dtype)
     Sigma = torch.zeros(2 * N, 2 * N, dtype=dtype)
-    G = sigma_ref * torch.eye(N, dtype=dtype)
+    G0 = sigma_ref * torch.eye(N, dtype=dtype)
 
     for t in range(1, T + 1):
-        A_vx, A_vv = _extract_Avx_Avv_coupled_gamma(N, gamma_self, gamma_couple_zero, alpha, beta_zero, k_reference, None, t, T, False, time_scale_fn)
-        M = _forward_step_matrix(A_vx, A_vv, dt)
-        Nmat = _noise_injection_matrix(G, dt)
+        A_vx, A_vv = _extract_Avx_Avv_coupled_gamma(N, gamma_self, gamma_couple_zero, alpha, beta_zero, k_reference, None, t, T, True, time_scale_fn)
+        time_scale = _time_scale(torch.as_tensor(float(t), dtype=dtype), T, time_scale_fn)
+        kin_scale = time_scale if scale_kinematics_with_time else 1.0
+        G = G0 * time_scale.clamp_min(0).sqrt() if scale_diffusion_with_time else G0
+        M = _forward_step_matrix(A_vx, A_vv, dt, time_scale=kin_scale)
+        Nmat = _noise_injection_matrix(G, dt, time_scale=kin_scale)
         Phi = M @ Phi
         Sigma = M @ Sigma @ M.T + Nmat @ Nmat.T
 
     for t in range(T, 0, -1):
-        A_vx, A_vv = _extract_Avx_Avv_coupled_gamma(N, gamma_self, gamma_couple_zero, alpha, beta_zero, k_reference, None, t, T, False, time_scale_fn)
-        M = _reverse_step_matrix(A_vx, A_vv, dt)
-        Nmat = _reverse_noise_injection_matrix(G, dt)
+        A_vx, A_vv = _extract_Avx_Avv_coupled_gamma(N, gamma_self, gamma_couple_zero, alpha, beta_zero, k_reference, None, t, T, True, time_scale_fn)
+        time_scale = _time_scale(torch.as_tensor(float(t), dtype=dtype), T, time_scale_fn)
+        kin_scale = time_scale if scale_kinematics_with_time else 1.0
+        G = G0 * time_scale.clamp_min(0).sqrt() if scale_diffusion_with_time else G0
+        M = _reverse_step_matrix(A_vx, A_vv, dt, time_scale=kin_scale)
+        Nmat = _reverse_noise_injection_matrix(G, dt, time_scale=kin_scale)
         Phi = M @ Phi
         Sigma = M @ Sigma @ M.T + Nmat @ Nmat.T
 
@@ -106,9 +115,12 @@ def roundtrip_propagator(
 def roundtrip_leak_snr(
     N: int, gamma_self: float, alpha: List[float], k_reference: float,
     cov_data: torch.Tensor, T: int, dt: float, time_scale_fn, sigma_ref: float = 1.0,
+    scale_kinematics_with_time: bool = True, scale_diffusion_with_time: bool = True,
 ) -> float:
     Phi_x, Sigma_x = roundtrip_propagator(N, gamma_self, alpha, k_reference, T, dt, time_scale_fn,
-                                           sigma_ref=sigma_ref, dtype=cov_data.dtype)
+                                           sigma_ref=sigma_ref, dtype=cov_data.dtype,
+                                           scale_kinematics_with_time=scale_kinematics_with_time,
+                                           scale_diffusion_with_time=scale_diffusion_with_time)
     cov_final_x = Phi_x @ cov_data @ Phi_x.T + Sigma_x
 
     def corr_matrix(cov: torch.Tensor) -> torch.Tensor:
@@ -130,8 +142,11 @@ def roundtrip_leak_snr(
 def calibrate_sigma_for_leak(
     N: int, gamma_self: float, alpha: List[float], k_reference: float,
     cov_data: torch.Tensor, T: int, dt: float, time_scale_fn, leak_fraction: float = 0.01,
+    scale_kinematics_with_time: bool = True, scale_diffusion_with_time: bool = True,
 ) -> float:
-    snr_ref = roundtrip_leak_snr(N, gamma_self, alpha, k_reference, cov_data, T, dt, time_scale_fn, sigma_ref=1.0)
+    snr_ref = roundtrip_leak_snr(N, gamma_self, alpha, k_reference, cov_data, T, dt, time_scale_fn, sigma_ref=1.0,
+                                  scale_kinematics_with_time=scale_kinematics_with_time,
+                                  scale_diffusion_with_time=scale_diffusion_with_time)
     k = snr_ref * 1.0**2
     snr_target = leak_fraction / (1 - leak_fraction)
     return (k / snr_target) ** 0.5
@@ -140,6 +155,7 @@ def calibrate_sigma_for_leak(
 def precompute_transition_params(
     N: int, gamma_self: float, gamma_couple: float, alpha: List[float], beta: List[float],
     k_reference: float, coupling, T: int, dt: float, g_fn, constant_k: bool, time_scale_fn,
+    scale_kinematics_with_time: bool = True, scale_diffusion_with_time: bool = True,
 ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
     device = coupling.device if coupling is not None else torch.device("cpu")
     Phi = torch.eye(2 * N, device=device)
@@ -147,9 +163,12 @@ def precompute_transition_params(
     params = []
     for t in range(1, T + 1):
         A_vx, A_vv = _extract_Avx_Avv_coupled_gamma(N, gamma_self, gamma_couple, alpha, beta, k_reference, coupling, t, T, constant_k, time_scale_fn)
-        M = _forward_step_matrix(A_vx, A_vv, dt)
-        G = g_fn(t, T)
-        Nmat = _noise_injection_matrix(G, dt)
+        time_scale = _time_scale(torch.as_tensor(float(t), device=device), T, time_scale_fn)
+        kin_scale = time_scale if scale_kinematics_with_time else 1.0
+        M = _forward_step_matrix(A_vx, A_vv, dt, time_scale=kin_scale)
+        G0 = g_fn(t, T)
+        G = G0 * time_scale.clamp_min(0).sqrt() if scale_diffusion_with_time else G0
+        Nmat = _noise_injection_matrix(G, dt, time_scale=kin_scale)
         Q = Nmat @ Nmat.T
         Phi = M @ Phi
         Sigma = M @ Sigma @ M.T + Q
@@ -182,3 +201,107 @@ def sample_and_tikhonov_score_target(Z0: torch.Tensor, Phi_t: torch.Tensor, Sigm
     reg_precision = torch.linalg.inv(Var_V_given_X + lam * torch.eye(N, device=device))
     score_v_reg = -resid @ reg_precision.T
     return Zt, score_v_reg
+
+
+def tau_hat_default_schedule(T: int, dt: float) -> float:
+    """Closed-form integral_0^{T*dt} tau_phys(s) ds for the default schedule tau(t,T)=(T-t)/(t+T).
+    tau(t,T) depends only on the ratio t/T (exactly, for every T -- (T-t)/(t+T) with sigma=t/T is
+    (1-sigma)/(1+sigma)), and physical time at step t is s=t*dt, so writing sigma=s/(T*dt):
+    integral_0^{T*dt} tau_phys(s) ds = (T*dt) * integral_0^1 (1-sigma)/(1+sigma) dsigma
+                                      = (T*dt) * (2*ln(2) - 1).
+    See writeup/csho_writeup.tex app:propagator. NOTE: this is a fixed multiple of the total
+    physical duration T*dt, not of the raw step count T alone -- do not evaluate this at (t, T)
+    step-index pairs directly, since tau(t,T)'s own t,T are step indices, not physical time."""
+    return T * dt * (2.0 * math.log(2.0) - 1.0)
+
+
+def tau_hat_vp_linear_schedule(T: int, dt: float) -> float:
+    """Closed-form integral_0^{T*dt} tau_phys(s) ds for the vp_linear schedule tau(t,T)=t/T, by the
+    same t/T-homogeneity argument as tau_hat_default_schedule: integral_0^1 sigma dsigma = 1/2, so
+    the physical-time integral is (T*dt)/2."""
+    return T * dt * 0.5
+
+
+def closed_form_propagator(
+    N: int, gamma_self: float, gamma_couple: float, alpha: List[float], beta: List[float],
+    k_reference: float, coupling: Optional[torch.Tensor], tau_hat: float,
+    constant_k: bool = False, sigma_ref: float = 1.0, dtype=torch.float32,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Exact continuous-time transition kernel (mean propagator Phi and covariance Sigma) for the
+    forward SDE dX=tau(t)V dt, dV=tau(t)(A_vx0 X + A_vv0 V) dt + sqrt(tau(t))*sigma_ref dW, via the
+    Van Loan (1978) block-matrix-exponential trick -- a single torch.matrix_exp call, no discrete-time
+    step composition and hence no O(dt) discretization error, unlike precompute_transition_params'/
+    roundtrip_propagator's chained _forward_step_matrix composition.
+
+    `tau_hat` is the closed-form value of the *physical-time* integral integral_0^{T*dt} tau_phys(s) ds
+    for whichever schedule/duration/step-size is in force -- see tau_hat_default_schedule(T, dt) /
+    tau_hat_vp_linear_schedule(T, dt) (the two schedules actually used in this repo; a schedule
+    without a known closed-form antiderivative is not supported here). Do not pass the raw step-index
+    quantity tau(t,T) integrated over t directly -- see those functions' docstrings for why.
+    A_vx0/A_vv0 (the tau-independent linearized dynamics blocks) are schedule-independent, so this
+    function needs no time_scale_fn itself -- only the physical parameters and the one scalar tau_hat.
+
+    Returns the full 2N-dim (X,V) propagator/covariance, matching precompute_transition_params' and
+    roundtrip_propagator's forward-only per-step convention (not a round trip, no X-marginal
+    slicing) -- see tests/test_closed_form_propagator.py for the correctness check against the
+    fine-dt discrete limit.
+
+    Requires constant_k=True. With constant_k=False, K_global's contribution to confinement is
+    embedded inside kappa_hat=tau(t)*K_global *before* the shared outer tau(t) envelope multiplies
+    the whole confinement term again -- K_self scales as tau(t)^1 but K_global scales as tau(t)^2,
+    so the true generator is NOT a single scalar tau(t) times one fixed matrix (see
+    writeup/csho_writeup.tex app:propagator) and this closed form does not apply; verified directly
+    (this function silently returns a wrong answer for constant_k=False without this guard --
+    caught via tests/test_closed_form_propagator.py disagreeing with precompute_transition_params'
+    true fine-dt limit, not by reasoning alone).
+    """
+    if not constant_k:
+        raise ValueError(
+            "closed_form_propagator requires constant_k=True: with constant_k=False, K_global enters "
+            "confinement at tau(t)^2 (via kappa_hat embedded in Omega^2, then the shared outer tau(t) "
+            "envelope) while K_self and damping stay at tau(t)^1, so the generator is J_0 + tau(t)*J_1 "
+            "+ tau(t)^2*J_2 -- not tau(t)*J_fixed -- and the Van Loan single-matrix_exp trick used here "
+            "does not apply. See writeup/csho_writeup.tex app:propagator."
+        )
+    const_one = lambda t, T: torch.tensor(1.0)
+    A_vx0, A_vv0 = _extract_Avx_Avv_coupled_gamma(
+        N, gamma_self, gamma_couple, alpha, beta, k_reference, coupling,
+        t=1, T=1, constant_k=constant_k, time_scale_fn=const_one,
+    )
+    A_vx0 = A_vx0.to(dtype)
+    A_vv0 = A_vv0.to(dtype)
+
+    J = torch.zeros(2 * N, 2 * N, dtype=dtype)
+    J[:N, N:] = torch.eye(N, dtype=dtype)
+    J[N:, :N] = A_vx0
+    J[N:, N:] = A_vv0
+
+    L = torch.zeros(2 * N, N, dtype=dtype)
+    L[N:, :] = sigma_ref * torch.eye(N, dtype=dtype)
+    LLT = L @ L.T
+
+    M = torch.zeros(4 * N, 4 * N, dtype=dtype)
+    M[:2 * N, :2 * N] = J
+    M[:2 * N, 2 * N:] = LLT
+    M[2 * N:, 2 * N:] = -J.T
+
+    # The augmented matrix's bottom-right block (-J^T) has eigenvalues that are the negatives of
+    # J's (Hurwitz-stable) spectrum, i.e. positive real part -- exp(tau_hat * -J^T) genuinely diverges
+    # as tau_hat grows, independent of any implementation choice (Van Loan 1978's trick always has
+    # this property). float64 overflows around exp(709); guard with headroom rather than let it
+    # silently return NaN/Inf.
+    max_real_eig = torch.linalg.eigvals(J).real.abs().max().item()
+    if tau_hat * max_real_eig > 600.0:
+        raise OverflowError(
+            f"closed_form_propagator: tau_hat={tau_hat:.3g} * max|Re(eig(J))|={max_real_eig:.3g} "
+            f"= {tau_hat * max_real_eig:.3g} is too large for a stable matrix_exp (float64 overflows "
+            "around exp(709)); this schedule/duration combination is outside where this closed form "
+            "can be evaluated directly -- production n_diff_steps<=128 configurations are well inside "
+            "the safe range."
+        )
+
+    Mexp = torch.matrix_exp(tau_hat * M)
+    Phi = Mexp[:2 * N, :2 * N]
+    Phi_Sigma = Mexp[:2 * N, 2 * N:]
+    Sigma = Phi_Sigma @ Phi.T
+    return Phi, Sigma
