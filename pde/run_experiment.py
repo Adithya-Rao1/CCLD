@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import math
 import os
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -19,8 +19,8 @@ from core.reporting import plot_bar_comparison, render_experiment_report, write_
 from core.sde import build_g_matrix_n
 from core.stats import aggregate_over_seeds
 from synthetic.anderson_sde import anderson_em_step_coupled_gamma, anderson_reverse_step_coupled_gamma
-from synthetic.drift_coupled_gamma import calibrate_coupled_gammas
-from synthetic.exact_dsm import calibrate_sigma_for_leak, precompute_transition_params, sample_and_tikhonov_score_target
+from synthetic.drift_coupled_gamma import calibrate_coupled_gammas, calibrate_sigma_fdt, calibrate_sigma_fdt_coupled
+from synthetic.exact_dsm import precompute_transition_params, sample_and_tikhonov_score_target
 from pde.dataset import ALL_PROBLEMS, MultiPhysicsFieldDataset, collate_fn, _get_or_create_target_norm_stats
 from pde.pde_residuals import e_flow_residual, pde_residual_metric, te_heat_normalize_mater, te_heat_residual, va_residual
 
@@ -89,9 +89,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--target-zeta", type=float, default=None)
     p.add_argument("--alpha", default="1.0")
     p.add_argument("--beta", default="0.5")
-    p.add_argument("--leak-fraction", type=float, default=0.01,
-                    help="target correlation-leak fraction for CSHO's exact matrix-recursion sigma calibration "
-                         "(synthetic/exact_dsm.py::calibrate_sigma_for_leak); replaces the old flat --sigma")
     p.add_argument("--lam", type=float, default=0.1, help="Tikhonov regularization strength for the DSM score target")
     p.add_argument("--k-reference", type=float, default=1.0,
                     help="fixed confinement/coupling stiffness ensuring critical damping -- NOT learned from data "
@@ -157,14 +154,27 @@ def parse_args(argv=None) -> argparse.Namespace:
     return args
 
 
-def build_method_state(args, N: int, device, sigma: float = None):
+def build_method_state(args, N: int, device, sigma_ab=None):
     if args.method in METHOD_CONFIGS:
         cfg = METHOD_CONFIGS[args.method]
         coupling = build_coupling_matrix(N, mode=cfg["coupling_mode"], device=device)
-        g_per_task = None
-        if cfg["diffusion_mode"] == "independent":
-            g_per_task = [sigma * (0.8 + 0.4 * i / max(N - 1, 1)) for i in range(N)]
-        return {"is_csho": True, "cfg": cfg, "coupling": coupling, "g_per_task": g_per_task, "ddpm_sched": None, "sigma": sigma}
+        a, b = sigma_ab
+        if args.method == "csho":
+            g_per_task = None
+            g_matrix = build_g_matrix_n(
+                torch.tensor(a, device=device), N, diffusion_mode="shared",
+                coupling_matrix=b * coupling,
+            )
+        else:
+            g_per_task = None
+            if cfg["diffusion_mode"] == "independent":
+                g_per_task = [a * (0.8 + 0.4 * i / max(N - 1, 1)) for i in range(N)]
+            g_matrix = build_g_matrix_n(
+                torch.tensor(a, device=device), N, diffusion_mode=cfg["diffusion_mode"],
+                g_per_task=g_per_task, coupling_matrix=coupling if cfg["diffusion_mode"] == "independent" else None,
+            )
+        return {"is_csho": True, "cfg": cfg, "coupling": coupling, "g_per_task": g_per_task,
+                "ddpm_sched": None, "sigma": a, "g_matrix": g_matrix}
     if args.method == "ddpm":
         return {"is_csho": False, "cfg": None, "coupling": None, "g_per_task": None,
                 "ddpm_sched": make_ddpm_schedule(args.n_diff_steps, device=device)}
@@ -219,8 +229,8 @@ def _build_score_fns(args, score_net, conditioning):
     return make_score_fn(score_net, conditioning), make_flat_score_fn(score_net, conditioning)
 
 
-def _calibrate_csho_sigma(model, train_loader, N: int, gamma_self: float,
-                           args: argparse.Namespace, device, task_names, is_spatial: bool) -> float:
+def _calibrate_csho_sigma(model, train_loader, N: int, gamma_self: float, gamma_couple: float,
+                           args: argparse.Namespace, device, task_names, is_spatial: bool) -> Tuple[float, float]:
     batch = next(iter(train_loader))
     conditioning = batch["conditioning"].to(device)
     if "elliptic_params" in batch:
@@ -230,10 +240,10 @@ def _calibrate_csho_sigma(model, train_loader, N: int, gamma_self: float,
         X, _, _, _, _ = _encode_state(args, model, task_names, model_conditioning, is_spatial)
     X_flat = torch.cat([X[i][0].reshape(-1, 1) for i in range(N)], dim=-1).detach().cpu()
     cov_data = torch.cov(X_flat.T)
-    sigma = calibrate_sigma_for_leak(
-        N, gamma_self, args.alpha_list, args.k_reference, cov_data,
-        args.n_diff_steps, args.dt, None, leak_fraction=args.leak_fraction,
-    )
+    if args.method == "csho":
+        a, b = calibrate_sigma_fdt_coupled(gamma_self, gamma_couple, N)
+    else:
+        a, b = calibrate_sigma_fdt(gamma_self), 0.0
     if args.debug_rollout:
         std = cov_data.diagonal().clamp_min(1e-12).sqrt()
         corr = cov_data / (std[:, None] * std[None, :])
@@ -241,8 +251,8 @@ def _calibrate_csho_sigma(model, train_loader, N: int, gamma_self: float,
         rho_true = off.sum().item() / (N * (N - 1))
         print(f"[debug-rollout] cov_data diag (per-task variance) = {dict(zip(task_names, std.pow(2).tolist()))}")
         print(f"[debug-rollout] cov_data mean pairwise corr (rho_true) = {rho_true:.6f}")
-        print(f"[debug-rollout] calibrated sigma = {sigma}")
-    return sigma
+        print(f"[debug-rollout] calibrated sigma (a, b) = ({a}, {b})")
+    return a, b
 
 
 def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
@@ -317,16 +327,14 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
     )
 
     if is_csho:
-        sigma = _calibrate_csho_sigma(model, train_loader, N, gamma_self, args, device,
-                                       task_names, is_spatial)
-        state = build_method_state(args, N, device, sigma=sigma)
+        sigma_ab = _calibrate_csho_sigma(model, train_loader, N, gamma_self, gamma_couple, args, device,
+                                          task_names, is_spatial)
+        state = build_method_state(args, N, device, sigma_ab=sigma_ab)
         coupling = state["coupling"]
+        g_matrix = state["g_matrix"]
         params = precompute_transition_params(
             N, gamma_self, gamma_couple, args.alpha_list, args.beta_list, args.k_reference, coupling,
-            args.n_diff_steps, args.dt, lambda t, T: build_g_matrix_n(
-                torch.tensor(sigma, device=device), N, diffusion_mode=state["cfg"]["diffusion_mode"],
-                g_per_task=state["g_per_task"], coupling_matrix=coupling if state["cfg"]["diffusion_mode"] == "independent" else None,
-            ), args.constant_k, None,
+            args.n_diff_steps, args.dt, lambda t, T: g_matrix, args.constant_k, None,
         )
     else:
         state = build_method_state(args, N, device)
@@ -450,11 +458,9 @@ def evaluate(args, model, score_net, val_loader, device, task_names, state, gamm
         X, K_self, K_global, feat, _ = _encode_state(args, model, task_names, model_conditioning, is_spatial)
 
         if is_csho:
-            cfg, coupling, g_per_task, sigma = state["cfg"], state["coupling"], state["g_per_task"], state["sigma"]
+            coupling, G = state["coupling"], state["g_matrix"]
             V = [[torch.zeros_like(x[0])] for x in X]
             X_cur, V_cur = X, V
-            G = build_g_matrix_n(torch.tensor(sigma, device=device), N, diffusion_mode=cfg["diffusion_mode"],
-                                  g_per_task=g_per_task, coupling_matrix=coupling if cfg["diffusion_mode"] == "independent" else None)
             score_fn, _ = _build_score_fns(args, score_net, feat)
             debug_this_batch = args.debug_rollout and first_batch
             for t_idx in reversed(range(1, args.n_diff_steps + 1)):
