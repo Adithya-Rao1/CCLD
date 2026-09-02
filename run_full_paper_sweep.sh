@@ -5,6 +5,7 @@ N_SEEDS="${1:-20}"
 N_ITERS="${2:-10000}"
 N_SAMPLES="${3:-40000}"
 PDE_DATA_ROOT="${4:-/home/ubuntu/metis-v1-storage/CSHM-data/multiphysics}"
+PDE_N_EPOCHS="${5:-150}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
@@ -36,18 +37,17 @@ bash run_stepcount_sweep.sh "${N_SEEDS}" "${N_ITERS}" "${N_SAMPLES}"
 echo "############################################################"
 echo "### PHASE 2: pde/ multiphysics grid                       ###"
 echo "############################################################"
-echo "=== data-root: ${PDE_DATA_ROOT} ==="
+echo "=== data-root: ${PDE_DATA_ROOT}, n-epochs: ${PDE_N_EPOCHS} ==="
 
 PROBLEMS=(TE_heat E_flow VA)
 METHODS=(csho ddpm sdm)
 ARCHES=(attention fno songunet)
-PDE_N_EPOCHS=50
 PDE_N_DIFF_STEPS=20
 PDE_BATCH_SIZE=64
 PDE_SEEDS="0,1,2,3,4"
 declare -A PDE_LR=(
   [attention]="0.001"
-  [fno]="0.001"
+  [fno]="0.0003"
   [songunet]="0.001"
 )
 
