@@ -8,16 +8,17 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
 
 ARCHES=(fno songunet)
-LRS=(0.00001)
+LRS=(0.0001 0.0003 0.001 0.003)
 
 echo "############################################################"
-echo "### LR sanity check: TE_heat/csho/{fno,songunet}         ###"
+echo "### LR sanity check (post closed-form/FDT recalibration) ###"
+echo "### TE_heat/csho/{fno,songunet}                           ###"
 echo "### n_epochs=${N_EPOCHS}, seed=0, lr in {${LRS[*]}}      ###"
 echo "############################################################"
 
 for ARCH in "${ARCHES[@]}"; do
   for LR in "${LRS[@]}"; do
-    OUT_DIR="results/lr_sanity_check/TE_heat_csho_${ARCH}_lr${LR}"
+    OUT_DIR="results/lr_sanity_check_v2/TE_heat_csho_${ARCH}_lr${LR}"
     RESULT_FILE="${OUT_DIR}/csho_results.json"
     if [ -f "${RESULT_FILE}" ]; then
       echo "--- ${ARCH} lr=${LR}: already present at ${RESULT_FILE}, skipping ---"
@@ -44,8 +45,8 @@ import json, os, glob
 
 rows = []
 for arch in ['fno', 'songunet']:
-    for lr in ['0.00001', '0.0003', '0.001', '0.003']:
-        path = f'results/lr_sanity_check/TE_heat_csho_{arch}_lr{lr}/csho_results.json'
+    for lr in ['0.0001', '0.0003', '0.001', '0.003']:
+        path = f'results/lr_sanity_check_v2/TE_heat_csho_{arch}_lr{lr}/csho_results.json'
         if not os.path.exists(path):
             rows.append((arch, lr, None))
             continue
