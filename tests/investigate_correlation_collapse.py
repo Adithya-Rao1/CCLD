@@ -292,6 +292,46 @@ def test_B3_combined(device):
                     sum(corr_gens) / len(corr_gens), sum(corr_trues) / len(corr_trues), sum(kls) / len(kls))
 
 
+def test_B4_free_dt_rescale(device):
+    print("\n=== B4: candidate fix -- 'free' tau rescale (same steps, dt x4, zero extra compute) ===")
+    dt_free = 4.0 / N_DIFF_STEPS_BASE 
+    _setup_sweep_module(device, N_DIFF_STEPS_BASE, dt_free, N_TRAIN_ITERS_SMOKE)
+    for N in N_SWEEP:
+        sigma_ab = sweep._get_sigma_n(N)
+        corr_gens, corr_trues, kls = [], [], []
+        for seed in SEEDS_SMOKE:
+            torch.manual_seed(seed)
+            gt = make_ground_truth(N, COUPLING_STRENGTH, seed, 1.0, 1.0, device=device)
+            score_net, gs, gc, coupling, prior_std = sweep.train_csho_tikhonov(N, sigma_ab, gt, device)
+            sweep.N_SAMPLES = N_SAMPLES_SMOKE
+            generated = sweep.sample_csho_anderson(N, sigma_ab, score_net, gs, gc, coupling, prior_std, device)
+            m = evaluate_sampling_quality(generated, gt)
+            corr_gens.append(m["mean_pairwise_corr_gen"]); corr_trues.append(m["mean_pairwise_corr_true"]); kls.append(m["kl_divergence"])
+        _record("B4", "coupled G, tau_hat~2.00 (free dt x4)", N,
+                sum(corr_gens) / len(corr_gens), sum(corr_trues) / len(corr_trues), sum(kls) / len(kls))
+
+
+def test_C1_constant_tau(device):
+    print("\n=== C1: curiosity -- constant tau(t)=c schedule (vs vp_linear ramp) ===")
+    dt_fixed = 1.0 / N_DIFF_STEPS_BASE
+    for c in [0.5, 1.0, 2.0]:
+        _setup_sweep_module(device, N_DIFF_STEPS_BASE, dt_fixed, N_TRAIN_ITERS_SMOKE, time_scale_fn=_constant_time_scale(c))
+        for N in N_SWEEP:
+            sigma_ab = sweep._get_sigma_n(N)
+            corr_gens, corr_trues, kls = [], [], []
+            for seed in SEEDS_SMOKE:
+                torch.manual_seed(seed)
+                gt = make_ground_truth(N, COUPLING_STRENGTH, seed, 1.0, 1.0, device=device)
+                score_net, gs, gc, coupling, prior_std = sweep.train_csho_tikhonov(N, sigma_ab, gt, device)
+                sweep.N_SAMPLES = N_SAMPLES_SMOKE
+                generated = sweep.sample_csho_anderson(N, sigma_ab, score_net, gs, gc, coupling, prior_std, device)
+                m = evaluate_sampling_quality(generated, gt)
+                corr_gens.append(m["mean_pairwise_corr_gen"]); corr_trues.append(m["mean_pairwise_corr_true"]); kls.append(m["kl_divergence"])
+            tau_hat_total = c * (N_DIFF_STEPS_BASE * dt_fixed)
+            _record("C1", f"constant tau={c}, tau_hat_total={tau_hat_total:.2f}", N,
+                    sum(corr_gens) / len(corr_gens), sum(corr_trues) / len(corr_trues), sum(kls) / len(kls))
+
+
 def print_summary():
     print("\n" + "=" * 100)
     print("SUMMARY (all groups)")
@@ -306,7 +346,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
     p.add_argument("--skip-training", action="store_true",
-                    help="skip the training-based tests (A1, B1, B2, B3) and run only the fast algebra-only checks (A2-A5)")
+                    help="skip the training-based tests (A1, B1-B4, C1) and run only the fast algebra-only checks (A2-A5)")
     args = p.parse_args()
     device = torch.device(args.device)
 
@@ -320,6 +360,8 @@ def main():
         test_B1_diagonal_diffusion(device)
         test_B2_increased_elapsed_time(device)
         test_B3_combined(device)
+        test_B4_free_dt_rescale(device)
+        test_C1_constant_tau(device)
     print_summary()
     print(f"\nTotal runtime: {time.time() - t0:.1f}s")
 
