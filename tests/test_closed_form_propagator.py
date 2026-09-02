@@ -107,6 +107,47 @@ def test_closed_form_matches_production_discrete_composition_in_fine_dt_limit():
         assert sigma_err < 1e-2, f"{label}: Sigma rel_err={sigma_err:.2e} vs production discrete composition"
 
 
+def test_closed_form_matches_production_discrete_composition_with_coupled_G0():
+    from synthetic.drift_coupled_gamma import calibrate_sigma_fdt_coupled
+
+    N = 2
+    coupling = build_coupling_matrix(N, mode="mean_field")
+    alpha = [1.0] * N
+    beta = [0.5] * N
+    k_reference = 1.0
+    gamma_self, gamma_couple = calibrate_coupled_gammas(1.0, 0.5, k_reference, k_reference, N)
+    a, b = calibrate_sigma_fdt_coupled(gamma_self, gamma_couple, N)
+    G0 = build_g_matrix_n(torch.tensor(a), N, diffusion_mode="shared", coupling_matrix=b * coupling).double()
+
+    for time_scale_fn, tau_hat_fn, label in (
+        (None, tau_hat_default_schedule, "default"),
+        (_vp_linear_time_scale, tau_hat_vp_linear_schedule, "vp_linear"),
+    ):
+        n_diff_steps = 5000
+        dt = 1.0 / n_diff_steps
+        g_fn = lambda t, T: G0
+        params = precompute_transition_params(
+            N, gamma_self, gamma_couple, alpha, beta, k_reference, coupling,
+            n_diff_steps, dt, g_fn, constant_k=True, time_scale_fn=time_scale_fn,
+        )
+        Phi_disc, Sigma_disc = params[-1]
+        tau_hat = tau_hat_fn(n_diff_steps, dt)
+        Phi_cf, Sigma_cf = closed_form_propagator(
+            N, gamma_self, gamma_couple, alpha, beta, k_reference, coupling, tau_hat,
+            constant_k=True, dtype=torch.float64, G0=G0,
+        )
+        phi_err = ((Phi_cf - Phi_disc).norm() / Phi_disc.norm().clamp_min(1e-8)).item()
+        sigma_err = ((Sigma_cf - Sigma_disc).norm() / Sigma_disc.norm().clamp_min(1e-8)).item()
+        assert phi_err < 1e-2, f"{label} (coupled G0): Phi rel_err={phi_err:.2e}"
+        assert sigma_err < 1e-2, f"{label} (coupled G0): Sigma rel_err={sigma_err:.2e}"
+
+        Phi_diag, Sigma_diag = closed_form_propagator(
+            N, gamma_self, gamma_couple, alpha, beta, k_reference, coupling, tau_hat,
+            constant_k=True, sigma_ref=1.0, dtype=torch.float64,
+        )
+        assert (Sigma_cf - Sigma_diag).norm() > 1e-3, "coupled G0 and diagonal sigma_ref=1.0 gave suspiciously identical Sigma"
+
+
 def test_constant_k_false_raises():
     N = 2
     coupling = build_coupling_matrix(N, mode="mean_field")
@@ -120,5 +161,6 @@ def test_constant_k_false_raises():
 if __name__ == "__main__":
     test_closed_form_matches_fine_dt_reference()
     test_closed_form_matches_production_discrete_composition_in_fine_dt_limit()
+    test_closed_form_matches_production_discrete_composition_with_coupled_G0()
     test_constant_k_false_raises()
     print("OK")
