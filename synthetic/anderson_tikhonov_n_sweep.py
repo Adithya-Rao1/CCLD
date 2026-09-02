@@ -12,8 +12,8 @@ from core.reporting import write_csv, write_json
 from core.sde import build_g_matrix_n
 from core.stats import aggregate_over_seeds, compare_configs
 from synthetic.anderson_sde import anderson_em_step_coupled_gamma, anderson_reverse_step_coupled_gamma
-from synthetic.drift_coupled_gamma import calibrate_coupled_gammas
-from synthetic.exact_dsm import calibrate_sigma_for_leak, precompute_transition_params, sample_and_tikhonov_score_target
+from synthetic.drift_coupled_gamma import calibrate_coupled_gammas, calibrate_sigma_fdt_coupled
+from synthetic.exact_dsm import precompute_transition_params, sample_and_tikhonov_score_target
 from synthetic.ground_truth_sde import GroundTruthCoupledOU, make_ground_truth
 from synthetic.run_experiment import CoupledScoreNet, _make_conditioning, _vp_linear_time_scale, evaluate_sampling_quality
 
@@ -28,21 +28,14 @@ COUPLING_STRENGTH = 0.6
 BETA = 1.0
 TIME_SCALE_FN = _vp_linear_time_scale
 
-LEAK_FRACTION = 0.01
-_sigma_cache: Dict[Tuple[int, int], float] = {}
+_sigma_cache: Dict[int, Tuple[float, float]] = {}
 
 
-def _get_sigma_n(N: int) -> float:
-    key = (N, N_DIFF_STEPS)
-    if key not in _sigma_cache:
-        gamma_self_dc, _ = calibrate_coupled_gammas(ALPHA_V, 0.0, K_REFERENCE, K_REFERENCE, N, target_zeta=TARGET_ZETA)
-        gt_ref = make_ground_truth(N, COUPLING_STRENGTH, seed=0, base_decay=1.0, sigma_scale=1.0)
-        cov_data = gt_ref.stationary_covariance()
-        _sigma_cache[key] = calibrate_sigma_for_leak(
-            N, gamma_self_dc, [ALPHA_V] * N, K_REFERENCE, cov_data,
-            N_DIFF_STEPS, DT, TIME_SCALE_FN, leak_fraction=LEAK_FRACTION,
-        )
-    return _sigma_cache[key]
+def _get_sigma_n(N: int) -> Tuple[float, float]:
+    if N not in _sigma_cache:
+        gamma_self, gamma_couple = calibrate_coupled_gammas(ALPHA_V, BETA, K_REFERENCE, K_REFERENCE, N, target_zeta=TARGET_ZETA)
+        _sigma_cache[N] = calibrate_sigma_fdt_coupled(gamma_self, gamma_couple, N)
+    return _sigma_cache[N]
 
 N_TRAIN_ITERS = 2000
 N_SAMPLES = 4000
@@ -52,13 +45,15 @@ OUT_DIR = "results/experiment_3_synthetic/anderson_tikhonov_n_sweep"
 BASELINE_DIR = "results/experiment_3_synthetic/exact_prior_std_sweep"
 
 
-def _g_fn(N: int, sigma: float, device):
+def _g_fn(N: int, sigma_ab: Tuple[float, float], coupling, device):
+    a, b = sigma_ab
+    g_matrix = build_g_matrix_n(torch.tensor(a, device=device), N, diffusion_mode="shared", coupling_matrix=b * coupling)
     def g_fn(t, T) -> torch.Tensor:
-        return build_g_matrix_n(torch.tensor(sigma, device=device), N, diffusion_mode="shared")
+        return g_matrix
     return g_fn
 
 
-def _estimate_prior_std_anderson(N: int, sigma: float, gt: GroundTruthCoupledOU, coupling, gamma_self, gamma_couple, g_fn, device) -> Tuple[List[float], List[float]]:
+def _estimate_prior_std_anderson(N: int, gt: GroundTruthCoupledOU, coupling, gamma_self, gamma_couple, g_fn, device) -> Tuple[List[float], List[float]]:
     B = 512
     X0 = gt.sample_stationary(B).to(device)
     X = [[X0[:, i : i + 1].clone()] for i in range(N)]
@@ -67,7 +62,7 @@ def _estimate_prior_std_anderson(N: int, sigma: float, gt: GroundTruthCoupledOU,
     for step in range(1, N_DIFF_STEPS + 1):
         X, V, _, _, _ = anderson_em_step_coupled_gamma(
             X, V, K_self_p, K_global_p, step, N_DIFF_STEPS,
-            [ALPHA_V] * N, [BETA] * N, gamma_self, gamma_couple, coupling, False, DT,
+            [ALPHA_V] * N, [BETA] * N, gamma_self, gamma_couple, coupling, True, DT,
             g_fn(step, N_DIFF_STEPS), time_scale_fn=TIME_SCALE_FN,
         )
     prior_std_x = [max(X[i][0].std().item(), 1e-3) for i in range(N)]
@@ -75,14 +70,14 @@ def _estimate_prior_std_anderson(N: int, sigma: float, gt: GroundTruthCoupledOU,
     return prior_std_x, prior_std_v
 
 
-def train_csho_tikhonov(N: int, sigma: float, gt: GroundTruthCoupledOU, device):
+def train_csho_tikhonov(N: int, sigma_ab: Tuple[float, float], gt: GroundTruthCoupledOU, device):
     coupling = build_coupling_matrix(N, mode="mean_field", device=device)
     gamma_self, gamma_couple = calibrate_coupled_gammas(ALPHA_V, BETA, K_REFERENCE, K_REFERENCE, N, target_zeta=TARGET_ZETA)
-    g_fn = _g_fn(N, sigma, device)
+    g_fn = _g_fn(N, sigma_ab, coupling, device)
 
     params = precompute_transition_params(
         N, gamma_self, gamma_couple, [ALPHA_V] * N, [BETA] * N, K_REFERENCE, coupling,
-        N_DIFF_STEPS, DT, g_fn, False, TIME_SCALE_FN,
+        N_DIFF_STEPS, DT, g_fn, True, TIME_SCALE_FN,
     )
 
     score_net = CoupledScoreNet(N, 64, 3, 16).to(device)
@@ -106,13 +101,13 @@ def train_csho_tikhonov(N: int, sigma: float, gt: GroundTruthCoupledOU, device):
         torch.nn.utils.clip_grad_norm_(score_net.parameters(), max_norm=1.0)
         optimizer.step()
 
-    prior_std = _estimate_prior_std_anderson(N, sigma, gt, coupling, gamma_self, gamma_couple, g_fn, device)
+    prior_std = _estimate_prior_std_anderson(N, gt, coupling, gamma_self, gamma_couple, g_fn, device)
     return score_net, gamma_self, gamma_couple, coupling, prior_std
 
 
 @torch.no_grad()
-def sample_csho_anderson(N: int, sigma: float, score_net, gamma_self, gamma_couple, coupling, prior_std, device):
-    g_fn = _g_fn(N, sigma, device)
+def sample_csho_anderson(N: int, sigma_ab: Tuple[float, float], score_net, gamma_self, gamma_couple, coupling, prior_std, device):
+    g_fn = _g_fn(N, sigma_ab, coupling, device)
     K_self, K_global = _make_conditioning(N, N_SAMPLES, K_REFERENCE, device)
     prior_std_x, prior_std_v = prior_std
     X = [[prior_std_x[i] * torch.randn(N_SAMPLES, 1, device=device)] for i in range(N)]
@@ -122,7 +117,7 @@ def sample_csho_anderson(N: int, sigma: float, score_net, gamma_self, gamma_coup
         score_outputs = score_net(X, V, t_idx)
         X, V = anderson_reverse_step_coupled_gamma(
             X, V, K_self, K_global, score_outputs, t_idx, N_DIFF_STEPS,
-            [ALPHA_V] * N, [BETA] * N, gamma_self, gamma_couple, coupling, False, DT,
+            [ALPHA_V] * N, [BETA] * N, gamma_self, gamma_couple, coupling, True, DT,
             g_fn(t_idx, N_DIFF_STEPS), time_scale_fn=TIME_SCALE_FN,
         )
     return torch.cat([X[i][0] for i in range(N)], dim=-1)
@@ -131,10 +126,10 @@ def sample_csho_anderson(N: int, sigma: float, score_net, gamma_self, gamma_coup
 def train_one_seed(N: int, seed: int) -> Dict[str, float]:
     torch.manual_seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    sigma = _get_sigma_n(N)
+    sigma_ab = _get_sigma_n(N)
     gt = make_ground_truth(N, COUPLING_STRENGTH, seed, 1.0, 1.0, device=device)
-    score_net, gamma_self, gamma_couple, coupling, prior_std = train_csho_tikhonov(N, sigma, gt, device)
-    generated = sample_csho_anderson(N, sigma, score_net, gamma_self, gamma_couple, coupling, prior_std, device)
+    score_net, gamma_self, gamma_couple, coupling, prior_std = train_csho_tikhonov(N, sigma_ab, gt, device)
+    generated = sample_csho_anderson(N, sigma_ab, score_net, gamma_self, gamma_couple, coupling, prior_std, device)
     return evaluate_sampling_quality(generated, gt)
 
 
@@ -159,7 +154,8 @@ def run():
             for seed, m in baseline_per_seed.items():
                 per_seed_rows.append({"N": N, "method": method_name, "seed": seed, **m})
 
-        print(f"\n=== N={N} (sigma={_get_sigma_n(N):.4f}, lam={LAM}, beta={BETA}, n_diff_steps={N_DIFF_STEPS}, dt={DT}) ===")
+        _a, _b = _get_sigma_n(N)
+        print(f"\n=== N={N} (a={_a:.4f}, b={_b:.4f}, lam={LAM}, beta={BETA}, n_diff_steps={N_DIFF_STEPS}, dt={DT}) ===")
         per_seed = {}
         for seed in SEEDS:
             m = train_one_seed(N, seed)
@@ -191,7 +187,7 @@ def run():
     write_csv(all_rows, os.path.join(OUT_DIR, "tikhonov_n_sweep_full.csv"))
     write_csv(summary_rows, os.path.join(OUT_DIR, "tikhonov_n_sweep_summary.csv"))
     write_json(
-        {"lam": LAM, "beta": BETA, "sigma_by_n": {N: _get_sigma_n(N) for N in N_SWEEP}, "n_sweep": N_SWEEP,
+        {"lam": LAM, "beta": BETA, "sigma_ab_by_n": {N: list(_get_sigma_n(N)) for N in N_SWEEP}, "n_sweep": N_SWEEP,
          "n_diff_steps": N_DIFF_STEPS, "dt": DT, "summary_rows": summary_rows},
         os.path.join(OUT_DIR, "tikhonov_n_sweep_results.json"),
     )
@@ -206,23 +202,15 @@ def run():
 
 
 def parse_args(argv=None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Champion Tikhonov-DSM CSHO vs. DDPM/SDM, N=2..5")
-    p.add_argument("--seeds", default="0,1,2,3,4", help="comma-separated seed list")
+    p = argparse.ArgumentParser(description="Tikhonov-DSM CSHO vs. DDPM/SDM, N=2..5")
+    p.add_argument("--seeds", default="0,1,2,3,4")
     p.add_argument("--n-train-iters", type=int, default=2000)
-    p.add_argument("--n-samples", type=int, default=4000, help="evaluation sample count for KL/correlation")
-    p.add_argument("--n-sweep", default="2,3,4,5", help="comma-separated N values")
-    p.add_argument("--n-diff-steps", type=int, default=20,
-                    help="reverse/forward diffusion step count; must match --n-diff-steps passed to "
-                         "run_experiment.py for the DDPM/SDM baselines for a fair matched-budget comparison")
-    p.add_argument("--dt", type=float, default=None,
-                    help="per-step size; defaults to 1/n_diff_steps, holding the total diffusion "
-                         "horizon n_diff_steps*dt fixed at 1.0 as n_diff_steps changes")
+    p.add_argument("--n-samples", type=int, default=4000)
+    p.add_argument("--n-sweep", default="2,3,4,5")
+    p.add_argument("--n-diff-steps", type=int, default=20)
+    p.add_argument("--dt", type=float, default=None)
     p.add_argument("--out-dir", default="results/experiment_3_synthetic/anderson_tikhonov_n_sweep")
-    p.add_argument("--baseline-dir", default="results/experiment_3_synthetic/exact_prior_std_sweep",
-                    help="directory containing N{n}_ddpm/ddpm_results.json and N{n}_sdm/sdm_results.json "
-                         "at a MATCHING seed count and n_train_iters -- for a fair comparison, regenerate "
-                         "these at the same budget as this run rather than reusing the original 5-seed/"
-                         "2000-iter baselines (see run_final_synthetic_experiments.sh).")
+    p.add_argument("--baseline-dir", default="results/experiment_3_synthetic/exact_prior_std_sweep")
     return p.parse_args(argv)
 
 
