@@ -37,11 +37,18 @@ def _record(group: str, label: str, N: int, corr_gen: float, corr_true: float, k
           f"pct={pct:6.1f}% {kl_str}{extra}")
 
 
-def _setup_sweep_module(device: str, n_diff_steps: int, dt: float, n_train_iters: int):
+def _setup_sweep_module(device: str, n_diff_steps: int, dt: float, n_train_iters: int, time_scale_fn=None):
     sweep.N_DIFF_STEPS = n_diff_steps
     sweep.DT = dt
     sweep.N_TRAIN_ITERS = n_train_iters
+    sweep.TIME_SCALE_FN = time_scale_fn if time_scale_fn is not None else sweep._vp_linear_time_scale
     sweep._sigma_cache.clear()
+
+
+def _constant_time_scale(c: float):
+    def time_scale_fn(t, T):
+        return torch.as_tensor(c, dtype=torch.float32)
+    return time_scale_fn
 
 
 def _exact_marginal_score(Zt, Phi_t, Sigma_gt, Sigma_t, N, jitter=1e-4):
