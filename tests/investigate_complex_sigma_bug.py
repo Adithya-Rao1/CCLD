@@ -12,8 +12,8 @@ DT = 1.0 / N_DIFF_STEPS  # A4
 K_REFERENCE = 1.0
 ALPHA = 1.0
 BETA = 0.5  # pde/run_experiment.py's --beta default (A3)
-LEAK_FRACTION = 0.01  # pde/run_experiment.py's --leak-fraction default
-SNR_TARGET = LEAK_FRACTION / (1 - LEAK_FRACTION)  # matches calibrate_sigma_for_leak
+LEAK_FRACTION = 0.01  
+SNR_TARGET = LEAK_FRACTION / (1 - LEAK_FRACTION) 
 N_TRIALS_PER_CONFIG = 2000
 VAR_LO, VAR_HI = 0.5, 2.0  # A1
 
@@ -77,8 +77,6 @@ def sweep_equicorrelated(N: int, Phi_x: torch.Tensor, Sigma_x: torch.Tensor, gen
 
 
 def _shrink_to_valid_correlation(corr: torch.Tensor, eps: float = 1e-3):
-    """Shrinks `corr` toward the identity by the minimal amount needed for it to be a valid
-    (PSD) correlation matrix, preserving the unit diagonal exactly (A2)."""
     N = corr.shape[0]
     min_eig = torch.linalg.eigvalsh(corr).min().item()
     if min_eig >= eps:

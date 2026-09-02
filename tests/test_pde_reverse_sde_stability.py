@@ -9,14 +9,13 @@ from typing import Dict, List
 import torch
 import torch.nn.functional as F
 
-from core.sde import build_g_matrix_n
 from pde.fno_score_net import FNOScoreNetwork, FlatFNOScoreNetwork
 from pde.model import FlatScoreNetwork, MultiPhysicsScoreNetwork, PhysicsModel, SpatialFieldModel
 from pde.run_experiment import _build_score_fns, _encode_state, build_method_state
 from pde.songunet_score_net import FlatSongUNetScoreNetwork, SongUNetScoreNetwork
 from synthetic.anderson_sde import anderson_reverse_step_coupled_gamma
-from synthetic.drift_coupled_gamma import calibrate_coupled_gammas
-from synthetic.exact_dsm import calibrate_sigma_for_leak, precompute_transition_params, sample_and_tikhonov_score_target
+from synthetic.drift_coupled_gamma import calibrate_coupled_gammas, calibrate_sigma_fdt_coupled
+from synthetic.exact_dsm import precompute_transition_params, sample_and_tikhonov_score_target
 
 SCORE_ARCHES = ["attention", "fno", "songunet"]
 PROBLEMS = ["TE_heat", "E_flow", "VA"]
@@ -50,8 +49,7 @@ def _make_args(score_arch: str, n_diff_steps: int, dt: float) -> argparse.Namesp
     ns.n_diff_steps = n_diff_steps
     ns.dt = dt
     ns.lam = 1.0
-    ns.leak_fraction = 0.01
-    ns.constant_k = False
+    ns.constant_k = True  # required for the closed-form kernel
     ns.damping_regime = "critically_damped"
     ns.target_zeta = None
     return ns
@@ -85,15 +83,8 @@ def _build_model_and_score_net(score_arch: str, task_names: List[str], n_diff_st
     return model, score_net, is_spatial
 
 
-def _calibrate_sigma(model, conditioning, N, gamma_self, args, device, task_names, is_spatial) -> float:
-    with torch.no_grad():
-        X, _, _, _, _ = _encode_state(args, model, task_names, conditioning, is_spatial)
-    X_flat = torch.cat([X[i][0].reshape(-1, 1) for i in range(N)], dim=-1).detach().cpu()
-    cov_data = torch.cov(X_flat.T)
-    return calibrate_sigma_for_leak(
-        N, gamma_self, args.alpha_list, args.k_reference, cov_data,
-        args.n_diff_steps, args.dt, None, leak_fraction=args.leak_fraction,
-    )
+def _calibrate_sigma(gamma_self, gamma_couple, N):
+    return calibrate_sigma_fdt_coupled(gamma_self, gamma_couple, N)
 
 
 def _realistic_targets(N: int, device) -> List[torch.Tensor]:
@@ -130,12 +121,8 @@ def zero_score_round_trip(score_arch: str, problem: str, device) -> Dict[str, fl
         args.alpha_list[0], args.beta_list[0], args.k_reference, args.k_reference, N,
         regime=args.damping_regime, target_zeta=args.target_zeta,
     )
-    state = build_method_state(args, N, device, sigma=0.0)
-    cfg, coupling, g_per_task = state["cfg"], state["coupling"], state["g_per_task"]
-    G = build_g_matrix_n(
-        torch.tensor(0.0, device=device), N, diffusion_mode=cfg["diffusion_mode"],
-        g_per_task=g_per_task, coupling_matrix=coupling if cfg["diffusion_mode"] == "independent" else None,
-    )
+    state = build_method_state(args, N, device, sigma_ab=(0.0, 0.0))
+    coupling, G = state["coupling"], state["g_matrix"]
 
     V = [[torch.zeros_like(x[0])] for x in X]
     X_cur, V_cur = X, V
@@ -176,16 +163,13 @@ def _train_csho_briefly(score_arch: str, problem: str, n_diff_steps: int, dt: fl
     target_std = [t.std().clamp_min(1e-6) for t in targets]
     targets_norm = [(t - m) / s for t, m, s in zip(targets, target_mean, target_std)]
 
-    sigma = _calibrate_sigma(model, conditioning, N, gamma_self, args, device, task_names, is_spatial)
-    state = build_method_state(args, N, device, sigma=sigma)
+    sigma_ab = _calibrate_sigma(gamma_self, gamma_couple, N)
+    state = build_method_state(args, N, device, sigma_ab=sigma_ab)
     coupling = state["coupling"]
+    g_matrix = state["g_matrix"]
     params = precompute_transition_params(
         N, gamma_self, gamma_couple, args.alpha_list, args.beta_list, args.k_reference, coupling,
-        n_diff_steps, dt, lambda t, T: build_g_matrix_n(
-            torch.tensor(sigma, device=device), N, diffusion_mode=state["cfg"]["diffusion_mode"],
-            g_per_task=state["g_per_task"],
-            coupling_matrix=coupling if state["cfg"]["diffusion_mode"] == "independent" else None,
-        ), args.constant_k, None,
+        n_diff_steps, dt, lambda t, T: g_matrix, args.constant_k, None,
     )
 
     model.train()
@@ -234,11 +218,7 @@ def _rollout_ratio(trained: dict, n_diff_steps: int, dt: float, device) -> float
     with torch.no_grad():
         conditioning = trained["conditioning"]
         X, K_self, K_global, feat, _ = _encode_state(args, model, task_names, conditioning, is_spatial)
-        cfg, coupling, g_per_task, sigma = state["cfg"], state["coupling"], state["g_per_task"], state["sigma"]
-        G = build_g_matrix_n(
-            torch.tensor(sigma, device=device), N, diffusion_mode=cfg["diffusion_mode"],
-            g_per_task=g_per_task, coupling_matrix=coupling if cfg["diffusion_mode"] == "independent" else None,
-        )
+        coupling, G = state["coupling"], state["g_matrix"]
         score_fn, _ = _build_score_fns(args, score_net, feat)
 
         V = [[torch.zeros_like(x[0])] for x in X]
