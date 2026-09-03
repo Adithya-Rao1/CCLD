@@ -13,6 +13,7 @@ from synthetic.anderson_sde import anderson_em_step_coupled_gamma, anderson_reve
 from synthetic.drift_coupled_gamma import calibrate_coupled_gammas, calibrate_sigma_fdt, calibrate_sigma_fdt_coupled
 from synthetic.exact_dsm import _extract_Avx_Avv_coupled_gamma, precompute_transition_params
 from synthetic.ground_truth_sde import make_ground_truth
+from synthetic.metrics import fit_gaussian
 from synthetic.run_experiment import _make_conditioning, evaluate_sampling_quality
 
 N_SWEEP = [2, 3, 5]
@@ -358,6 +359,54 @@ def test_C2_full_scale_verification(device, tau_values=(1.5, 2.0)):
             kl_std = (sum((k - kl_mean) ** 2 for k in kls) / len(kls)) ** 0.5
             _record("C2", f"[FULL SCALE] constant tau={c}, tau_hat={tau_hat_total:.2f}", N, cg_mean, ct_mean, kl_mean,
                     extra=f"kl_std={kl_std:.4f} (n=5 seeds)")
+
+
+def test_D1_kl_decomposition(device, tau=2.0):
+    print(f"\n=== D1: KL decomposition (constant tau={tau}) — is the residual KL variance-scale or correlation? ===")
+    dt_fixed = 1.0 / N_DIFF_STEPS_BASE
+    _setup_sweep_module(device, N_DIFF_STEPS_BASE, dt_fixed, N_TRAIN_ITERS_SMOKE, time_scale_fn=_constant_time_scale(tau))
+    for N in N_SWEEP:
+        sigma_ab = sweep._get_sigma_n(N)
+        rows = []
+        for seed in SEEDS_SMOKE:
+            torch.manual_seed(seed)
+            gt = make_ground_truth(N, COUPLING_STRENGTH, seed, 1.0, 1.0, device=device)
+            score_net, gs, gc, coupling, prior_std = sweep.train_csho_tikhonov(N, sigma_ab, gt, device)
+            sweep.N_SAMPLES = N_SAMPLES_SMOKE
+            generated = sweep.sample_csho_anderson(N, sigma_ab, score_net, gs, gc, coupling, prior_std, device)
+
+            mean_gen, cov_gen = fit_gaussian(generated.cpu())
+            mean_true = torch.zeros(N, dtype=cov_gen.dtype)
+            cov_true = gt.stationary_covariance().cpu()
+
+            eps = 1e-6
+            I = torch.eye(N, dtype=cov_gen.dtype)
+            cov_p = (cov_gen + cov_gen.T) / 2 + eps * I
+            cov_q = (cov_true + cov_true.T) / 2 + eps * I
+            cov_q_inv = torch.linalg.inv(cov_q)
+            diff = (mean_true - mean_gen).reshape(-1, 1)
+            trace_term = torch.trace(cov_q_inv @ cov_p).item()
+            mean_term = (diff.T @ cov_q_inv @ diff).squeeze().item()
+            logdet_q = torch.linalg.slogdet(cov_q)[1].item()
+            logdet_p = torch.linalg.slogdet(cov_p)[1].item()
+            kl = 0.5 * (trace_term + mean_term - N + logdet_q - logdet_p)
+
+            std_gen = cov_gen.diagonal().clamp_min(1e-12).sqrt()
+            std_true = cov_true.diagonal().clamp_min(1e-12).sqrt()
+            var_ratio = (std_gen / std_true).mean().item()
+
+            rows.append((trace_term, mean_term, logdet_q - logdet_p, kl, var_ratio))
+
+        n_rows = len(rows)
+        trace_m = sum(r[0] for r in rows) / n_rows
+        mean_m = sum(r[1] for r in rows) / n_rows
+        logdet_m = sum(r[2] for r in rows) / n_rows
+        kl_m = sum(r[3] for r in rows) / n_rows
+        var_ratio_m = sum(r[4] for r in rows) / n_rows
+        print(f"  [D1] N={N}: kl={kl_m:.4f}  trace_term={trace_m:.4f} (k={N})  mean_term={mean_m:.4f}  "
+              f"logdet(q)-logdet(p)={logdet_m:.4f}  std_gen/std_true={var_ratio_m:.4f}")
+        _record("D1", f"KL decomposition (tau={tau})", N, 0.0, 0.0, kl_m,
+                extra=f"trace={trace_m:.3f} mean_term={mean_m:.3f} logdet_diff={logdet_m:.3f} var_ratio={var_ratio_m:.3f}")
 
 
 def print_summary():
