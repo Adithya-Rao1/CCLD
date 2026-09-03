@@ -409,6 +409,62 @@ def test_D1_kl_decomposition(device, tau=2.0):
                 extra=f"trace={trace_m:.3f} mean_term={mean_m:.3f} logdet_diff={logdet_m:.3f} var_ratio={var_ratio_m:.3f}")
 
 
+def test_D2_score_error_vs_t(device, tau=2.0, n_sweep=None):
+    print(f"\n=== D2: trained score error vs. exact marginal score, as a function of diffusion step (tau={tau}) ===")
+    print("    (tests whether error concentrates near t_idx->0, i.e. Tikhonov under-strength near the singularity)")
+    dt_fixed = 1.0 / N_DIFF_STEPS_BASE
+    _setup_sweep_module(device, N_DIFF_STEPS_BASE, dt_fixed, N_TRAIN_ITERS_SMOKE, time_scale_fn=_constant_time_scale(tau))
+    for N in (n_sweep if n_sweep is not None else N_SWEEP):
+        sigma_ab = sweep._get_sigma_n(N)
+        coupling = build_coupling_matrix(N, mode="mean_field", device=device)
+        gamma_self, gamma_couple = calibrate_coupled_gammas(sweep.ALPHA_V, sweep.BETA, K_REFERENCE, K_REFERENCE, N, target_zeta=TARGET_ZETA)
+        g_fn = sweep._g_fn(N, sigma_ab, coupling, device)
+        params = precompute_transition_params(
+            N, gamma_self, gamma_couple, [sweep.ALPHA_V] * N, [sweep.BETA] * N, K_REFERENCE, coupling,
+            N_DIFF_STEPS_BASE, dt_fixed, g_fn, True, sweep.TIME_SCALE_FN,
+        )
+        gt = make_ground_truth(N, COUPLING_STRENGTH, seed=0, base_decay=1.0, sigma_scale=1.0, device=device)
+        Sigma_gt = gt.stationary_covariance()
+
+        torch.manual_seed(0)
+        score_net, gs, gc, coupling_trained, prior_std = sweep.train_csho_tikhonov(N, sigma_ab, gt, device)
+
+        B = 1024
+        rows = []
+        for t_idx in range(1, N_DIFF_STEPS_BASE + 1):
+            Phi_t, Sigma_t = params[t_idx - 1]
+            Zaug = torch.zeros(2 * N, 2 * N, device=device)
+            Zaug[:N, :N] = Sigma_gt
+            Sigma_m = Phi_t @ Zaug @ Phi_t.T + Sigma_t
+            Sigma_m = (Sigma_m + Sigma_m.T) / 2 + 1e-8 * torch.eye(2 * N, device=device)
+            L = torch.linalg.cholesky(Sigma_m)
+            Zt = torch.randn(B, 2 * N, device=device) @ L.T
+
+            X_t = [[Zt[:, i:i + 1]] for i in range(N)]
+            V_t = [[Zt[:, N + i:N + i + 1]] for i in range(N)]
+            with torch.no_grad():
+                score_pred_raw = score_net(X_t, V_t, t_idx)
+            score_pred = torch.cat([score_pred_raw[i][0] for i in range(N)], dim=-1)
+            score_exact = _exact_marginal_score(Zt, Phi_t, Sigma_gt, Sigma_t, N)
+
+            rel_err = ((score_pred - score_exact).norm(dim=-1) / score_exact.norm(dim=-1).clamp_min(1e-8)).mean().item()
+            mag_ratio = (score_pred.norm(dim=-1).mean() / score_exact.norm(dim=-1).mean().clamp_min(1e-8)).item()
+            tau_hat_t = tau * t_idx * dt_fixed
+            rows.append((t_idx, tau_hat_t, rel_err, mag_ratio))
+
+        print(f"  N={N}:")
+        for t_idx, tau_hat_t, rel_err, mag_ratio in rows:
+            if t_idx in (1, 2, 4, 8, 12, 16, 20, 24, 28, 30, 31, 32):
+                print(f"    t_idx={t_idx:3d}  tau_hat_t={tau_hat_t:.3f}  rel_err={rel_err:.3f}  "
+                      f"|pred|/|exact|={mag_ratio:.3f}")
+        near_zero = [r for r in rows if r[0] <= 4]
+        far = [r for r in rows if r[0] > N_DIFF_STEPS_BASE - 4]
+        mag_near0 = sum(r[3] for r in near_zero) / len(near_zero)
+        mag_far = sum(r[3] for r in far) / len(far)
+        _record("D2", f"score mag ratio (tau={tau})", N, mag_near0, mag_far,
+                extra=f"|pred|/|exact| near t_idx=0 (last few steps): {mag_near0:.3f}, near t_idx=T (first few steps): {mag_far:.3f}")
+
+
 def print_summary():
     print("\n" + "=" * 100)
     print("SUMMARY (all groups)")
