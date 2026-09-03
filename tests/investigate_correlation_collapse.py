@@ -314,7 +314,7 @@ def test_B4_free_dt_rescale(device):
 def test_C1_constant_tau(device):
     print("\n=== C1: curiosity -- constant tau(t)=c schedule (vs vp_linear ramp) ===")
     dt_fixed = 1.0 / N_DIFF_STEPS_BASE
-    for c in [0.5, 1.0, 2.0]:
+    for c in [3.0, 4.0]:
         _setup_sweep_module(device, N_DIFF_STEPS_BASE, dt_fixed, N_TRAIN_ITERS_SMOKE, time_scale_fn=_constant_time_scale(c))
         for N in N_SWEEP:
             sigma_ab = sweep._get_sigma_n(N)
@@ -330,6 +330,34 @@ def test_C1_constant_tau(device):
             tau_hat_total = c * (N_DIFF_STEPS_BASE * dt_fixed)
             _record("C1", f"constant tau={c}, tau_hat_total={tau_hat_total:.2f}", N,
                     sum(corr_gens) / len(corr_gens), sum(corr_trues) / len(corr_trues), sum(kls) / len(kls))
+
+
+def test_C2_full_scale_verification(device, tau_values=(1.5, 2.0)):
+    print(f"\n=== C2: full-scale verification (production N_TRAIN_ITERS=2000, N_SAMPLES=4000, 5 seeds) ===")
+    dt_fixed = 1.0 / N_DIFF_STEPS_BASE
+    seeds_full = [0, 1, 2, 3, 4]
+    n_train_iters_full = 2000
+    n_samples_full = 4000
+    for c in tau_values:
+        _setup_sweep_module(device, N_DIFF_STEPS_BASE, dt_fixed, n_train_iters_full, time_scale_fn=_constant_time_scale(c))
+        for N in N_SWEEP:
+            sigma_ab = sweep._get_sigma_n(N)
+            corr_gens, corr_trues, kls = [], [], []
+            for seed in seeds_full:
+                torch.manual_seed(seed)
+                gt = make_ground_truth(N, COUPLING_STRENGTH, seed, 1.0, 1.0, device=device)
+                score_net, gs, gc, coupling, prior_std = sweep.train_csho_tikhonov(N, sigma_ab, gt, device)
+                sweep.N_SAMPLES = n_samples_full
+                generated = sweep.sample_csho_anderson(N, sigma_ab, score_net, gs, gc, coupling, prior_std, device)
+                m = evaluate_sampling_quality(generated, gt)
+                corr_gens.append(m["mean_pairwise_corr_gen"]); corr_trues.append(m["mean_pairwise_corr_true"]); kls.append(m["kl_divergence"])
+            tau_hat_total = c * (N_DIFF_STEPS_BASE * dt_fixed)
+            cg_mean = sum(corr_gens) / len(corr_gens)
+            ct_mean = sum(corr_trues) / len(corr_trues)
+            kl_mean = sum(kls) / len(kls)
+            kl_std = (sum((k - kl_mean) ** 2 for k in kls) / len(kls)) ** 0.5
+            _record("C2", f"[FULL SCALE] constant tau={c}, tau_hat={tau_hat_total:.2f}", N, cg_mean, ct_mean, kl_mean,
+                    extra=f"kl_std={kl_std:.4f} (n=5 seeds)")
 
 
 def print_summary():
