@@ -15,18 +15,21 @@ from synthetic.anderson_sde import anderson_em_step_coupled_gamma, anderson_reve
 from synthetic.drift_coupled_gamma import calibrate_coupled_gammas, calibrate_sigma_fdt_coupled
 from synthetic.exact_dsm import precompute_transition_params, sample_and_tikhonov_score_target
 from synthetic.ground_truth_sde import GroundTruthCoupledOU, make_ground_truth
-from synthetic.run_experiment import CoupledScoreNet, _make_conditioning, _vp_linear_time_scale, evaluate_sampling_quality
+from synthetic.run_experiment import CoupledScoreNet, _make_conditioning, evaluate_sampling_quality
+
+def _constant_tau_time_scale(t, T) -> torch.Tensor:
+    return torch.tensor(2.0)
 
 ALPHA_V = 1.0
 K_REFERENCE = 1.0
 TARGET_ZETA = 1.0
-LAM = 0.1
-N_DIFF_STEPS = 20
-DT = 0.05
+LAM = 0.01
+N_DIFF_STEPS = 32
+DT = 1.0 / N_DIFF_STEPS
 BATCH_SIZE = 256
 COUPLING_STRENGTH = 0.6
 BETA = 1.0
-TIME_SCALE_FN = _vp_linear_time_scale
+TIME_SCALE_FN = _constant_tau_time_scale
 
 _sigma_cache: Dict[int, Tuple[float, float]] = {}
 
@@ -192,7 +195,7 @@ def run():
         os.path.join(OUT_DIR, "tikhonov_n_sweep_results.json"),
     )
 
-    print("\n\n=== SUMMARY: N=2..5, DDPM vs SDM vs CSHO-Tikhonov (Anderson-corrected, lam=0.1) ===")
+    print(f"\n\n=== SUMMARY: N=2..5, DDPM vs SDM vs CSHO-Tikhonov (Anderson-corrected, lam={LAM}) ===")
     print(f"{'N':>3} {'method':>16} {'KL':>10} {'corr_gen':>10} {'corr_true':>10} {'%true':>8}")
     for row in summary_rows:
         print(f"{row['N']:>3} {row['method']:>16} {row['kl_mean']:>10.4f} {row['corr_gen_mean']:>10.4f} {row['corr_true']:>10.4f} {row['corr_pct_of_true']:>8.1f}")

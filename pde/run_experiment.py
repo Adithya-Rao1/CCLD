@@ -89,13 +89,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--target-zeta", type=float, default=None)
     p.add_argument("--alpha", default="1.0")
     p.add_argument("--beta", default="0.5")
-    p.add_argument("--lam", type=float, default=0.1, help="Tikhonov regularization strength for the DSM score target")
+    p.add_argument("--lam", type=float, default=0.01, help="Tikhonov regularization strength for the DSM score target")
     p.add_argument("--k-reference", type=float, default=1.0,
                     help="fixed confinement/coupling stiffness ensuring critical damping -- NOT learned from data "
                          "(see PhysicsModel.encode's k_reference arg); this is what makes the exact closed-form "
                          "transition kernel valid, the same role K_REFERENCE plays in synthetic/")
     p.add_argument("--constant-k", action="store_true")
-    p.add_argument("--n-diff-steps", type=int, default=2)
+    p.add_argument("--n-diff-steps", type=int, default=32)
     p.add_argument("--dt", type=float, default=None)
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--n-epochs", type=int, default=5)
