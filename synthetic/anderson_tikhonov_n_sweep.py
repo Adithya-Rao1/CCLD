@@ -210,7 +210,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--n-train-iters", type=int, default=2000)
     p.add_argument("--n-samples", type=int, default=4000)
     p.add_argument("--n-sweep", default="2,3,4,5")
-    p.add_argument("--n-diff-steps", type=int, default=20)
+    p.add_argument("--n-diff-steps", type=int, default=32)
     p.add_argument("--dt", type=float, default=None)
     p.add_argument("--out-dir", default="results/experiment_3_synthetic/anderson_tikhonov_n_sweep")
     p.add_argument("--baseline-dir", default="results/experiment_3_synthetic/exact_prior_std_sweep")
