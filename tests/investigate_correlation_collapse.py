@@ -14,7 +14,7 @@ from synthetic.drift_coupled_gamma import calibrate_coupled_gammas, calibrate_si
 from synthetic.exact_dsm import _extract_Avx_Avv_coupled_gamma, precompute_transition_params
 from synthetic.ground_truth_sde import make_ground_truth
 from synthetic.metrics import fit_gaussian
-from synthetic.run_experiment import _make_conditioning, evaluate_sampling_quality
+from synthetic.run_experiment import CoupledScoreNet, _make_conditioning, evaluate_sampling_quality
 
 N_SWEEP = [2, 3, 5]
 N_TRAIN_ITERS_SMOKE = 500
@@ -463,6 +463,125 @@ def test_D2_score_error_vs_t(device, tau=2.0, n_sweep=None):
         mag_far = sum(r[3] for r in far) / len(far)
         _record("D2", f"score mag ratio (tau={tau})", N, mag_near0, mag_far,
                 extra=f"|pred|/|exact| near t_idx=0 (last few steps): {mag_near0:.3f}, near t_idx=T (first few steps): {mag_far:.3f}")
+
+
+def _sample_and_score_target_custom_lam(Z0, Phi_t, Sigma_t, N, lam_fn, jitter=1e-6):
+    B = Z0.shape[0]
+    device = Z0.device
+    mean = Z0 @ Phi_t.T
+    scale = Sigma_t.diagonal().abs().max().clamp_min(1.0)
+    Sigma_reg = Sigma_t + jitter * scale * torch.eye(2 * N, device=device)
+    L = torch.linalg.cholesky(Sigma_reg)
+    eps = torch.randn(B, 2 * N, device=device)
+    Zt = mean + eps @ L.T
+
+    Sxx, Sxv, Svx, Svv = Sigma_t[:N, :N], Sigma_t[:N, N:], Sigma_t[N:, :N], Sigma_t[N:, N:]
+    Sxx_inv = torch.linalg.inv(Sxx + jitter * scale * torch.eye(N, device=device))
+    Var_V_given_X = Svv - Svx @ Sxx_inv @ Sxv
+
+    diff_x = Zt[:, :N] - mean[:, :N]
+    diff_v = Zt[:, N:] - mean[:, N:]
+    E_V_given_X_dev = diff_x @ (Sxx_inv @ Sxv).clone()
+    resid = diff_v - E_V_given_X_dev
+
+    lam = lam_fn(Var_V_given_X)
+    reg_precision = torch.linalg.inv(Var_V_given_X + lam * torch.eye(N, device=device))
+    score_v_reg = -resid @ reg_precision.T
+    return Zt, score_v_reg
+
+
+def _fixed_lam(v):
+    return lambda Var_V_given_X: v
+
+
+def _relative_lam(eps_rel, floor=1e-4):
+    def f(Var_V_given_X):
+        N = Var_V_given_X.shape[0]
+        return max(eps_rel * (Var_V_given_X.trace().item() / N), floor)
+    return f
+
+
+LAM_SCHEMES = {
+    "fixed_0.1 (current)": _fixed_lam(0.1),
+    "fixed_0.03": _fixed_lam(0.03),
+    "fixed_0.01": _fixed_lam(0.01),
+    "relative_eps0.05": _relative_lam(0.05),
+    "relative_eps0.1": _relative_lam(0.1),
+}
+
+
+def _train_csho_custom_lam(N, sigma_ab, gt, device, lam_fn, n_train_iters):
+    coupling = build_coupling_matrix(N, mode="mean_field", device=device)
+    gamma_self, gamma_couple = calibrate_coupled_gammas(sweep.ALPHA_V, sweep.BETA, K_REFERENCE, K_REFERENCE, N, target_zeta=TARGET_ZETA)
+    g_fn = sweep._g_fn(N, sigma_ab, coupling, device)
+    params = precompute_transition_params(
+        N, gamma_self, gamma_couple, [sweep.ALPHA_V] * N, [sweep.BETA] * N, K_REFERENCE, coupling,
+        N_DIFF_STEPS_BASE, 1.0 / N_DIFF_STEPS_BASE, g_fn, True, sweep.TIME_SCALE_FN,
+    )
+
+    score_net = CoupledScoreNet(N, 64, 3, 16).to(device)
+    optimizer = torch.optim.Adam(score_net.parameters(), lr=1e-3)
+
+    for _ in range(n_train_iters):
+        X0 = gt.sample_stationary(sweep.BATCH_SIZE).to(device)
+        Z0 = torch.cat([X0, torch.zeros_like(X0)], dim=1)
+        t_idx = torch.randint(1, N_DIFF_STEPS_BASE + 1, (1,)).item()
+        Phi_t, Sigma_t = params[t_idx - 1]
+
+        Zt, score_v_target = _sample_and_score_target_custom_lam(Z0, Phi_t, Sigma_t, N, lam_fn)
+        X_t = [[Zt[:, i:i + 1]] for i in range(N)]
+        V_t = [[Zt[:, N + i:N + i + 1]] for i in range(N)]
+
+        score_pred = score_net(X_t, V_t, t_idx)
+        loss = sum(((score_pred[i][0] - score_v_target[:, i:i + 1]) ** 2).mean() for i in range(N))
+
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(score_net.parameters(), max_norm=1.0)
+        optimizer.step()
+
+    prior_std = sweep._estimate_prior_std_anderson(N, gt, coupling, gamma_self, gamma_couple, g_fn, device)
+    return score_net, gamma_self, gamma_couple, coupling, prior_std
+
+
+def test_E1_lam_sweep(device, tau=2.0):
+    print(f"\n=== E1: Tikhonov regularization scheme sweep (constant tau={tau}) ===")
+    dt_fixed = 1.0 / N_DIFF_STEPS_BASE
+    _setup_sweep_module(device, N_DIFF_STEPS_BASE, dt_fixed, N_TRAIN_ITERS_SMOKE, time_scale_fn=_constant_time_scale(tau))
+    for scheme_name, lam_fn in LAM_SCHEMES.items():
+        for N in N_SWEEP:
+            sigma_ab = sweep._get_sigma_n(N)
+            corr_gens, corr_trues, kls, var_ratios = [], [], [], []
+            n_nonfinite = 0
+            for seed in SEEDS_SMOKE:
+                torch.manual_seed(seed)
+                gt = make_ground_truth(N, COUPLING_STRENGTH, seed, 1.0, 1.0, device=device)
+                score_net, gs, gc, coupling, prior_std = _train_csho_custom_lam(N, sigma_ab, gt, device, lam_fn, N_TRAIN_ITERS_SMOKE)
+                sweep.N_SAMPLES = N_SAMPLES_SMOKE
+                generated = sweep.sample_csho_anderson(N, sigma_ab, score_net, gs, gc, coupling, prior_std, device)
+                if not torch.isfinite(generated).all():
+                    n_nonfinite += 1
+                    continue
+                m = evaluate_sampling_quality(generated, gt)
+                corr_gens.append(m["mean_pairwise_corr_gen"])
+                corr_trues.append(m["mean_pairwise_corr_true"])
+                kls.append(m["kl_divergence"])
+                mean_gen, cov_gen = fit_gaussian(generated.cpu())
+                cov_true = gt.stationary_covariance().cpu()
+                std_gen = cov_gen.diagonal().clamp_min(1e-12).sqrt()
+                std_true = cov_true.diagonal().clamp_min(1e-12).sqrt()
+                var_ratios.append((std_gen / std_true).mean().item())
+
+            if not corr_gens:
+                print(f"  [E1] {scheme_name:20s} N={N}: ALL {len(SEEDS_SMOKE)} SEEDS NON-FINITE (unstable)")
+                continue
+
+            cg = sum(corr_gens) / len(corr_gens)
+            ct = sum(corr_trues) / len(corr_trues)
+            kl = sum(kls) / len(kls)
+            vr = sum(var_ratios) / len(var_ratios)
+            unstable_note = f" [{n_nonfinite}/{len(SEEDS_SMOKE)} seeds non-finite]" if n_nonfinite else ""
+            _record("E1", f"{scheme_name}", N, cg, ct, kl, extra=f"var_ratio={vr:.3f}{unstable_note}")
 
 
 def print_summary():
