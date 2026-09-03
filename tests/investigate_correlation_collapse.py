@@ -584,6 +584,97 @@ def test_E1_lam_sweep(device, tau=2.0):
             _record("E1", f"{scheme_name}", N, cg, ct, kl, extra=f"var_ratio={vr:.3f}{unstable_note}")
 
 
+def test_E1b_lam_lower_sweep(device, tau=2.0, lam_values=(0.01, 0.003, 0.001, 0.0003, 0.0001)):
+    print(f"\n=== E1b: pushing fixed lam lower to find the instability floor (constant tau={tau}) ===")
+    dt_fixed = 1.0 / N_DIFF_STEPS_BASE
+    _setup_sweep_module(device, N_DIFF_STEPS_BASE, dt_fixed, N_TRAIN_ITERS_SMOKE, time_scale_fn=_constant_time_scale(tau))
+    for lam_value in lam_values:
+        lam_fn = _fixed_lam(lam_value)
+        scheme_name = f"fixed_{lam_value}"
+        for N in N_SWEEP:
+            sigma_ab = sweep._get_sigma_n(N)
+            corr_gens, corr_trues, kls, var_ratios = [], [], [], []
+            n_nonfinite = 0
+            for seed in SEEDS_SMOKE:
+                torch.manual_seed(seed)
+                gt = make_ground_truth(N, COUPLING_STRENGTH, seed, 1.0, 1.0, device=device)
+                score_net, gs, gc, coupling, prior_std = _train_csho_custom_lam(N, sigma_ab, gt, device, lam_fn, N_TRAIN_ITERS_SMOKE)
+                sweep.N_SAMPLES = N_SAMPLES_SMOKE
+                generated = sweep.sample_csho_anderson(N, sigma_ab, score_net, gs, gc, coupling, prior_std, device)
+                if not torch.isfinite(generated).all():
+                    n_nonfinite += 1
+                    continue
+                m = evaluate_sampling_quality(generated, gt)
+                corr_gens.append(m["mean_pairwise_corr_gen"])
+                corr_trues.append(m["mean_pairwise_corr_true"])
+                kls.append(m["kl_divergence"])
+                mean_gen, cov_gen = fit_gaussian(generated.cpu())
+                cov_true = gt.stationary_covariance().cpu()
+                std_gen = cov_gen.diagonal().clamp_min(1e-12).sqrt()
+                std_true = cov_true.diagonal().clamp_min(1e-12).sqrt()
+                var_ratios.append((std_gen / std_true).mean().item())
+
+            if not corr_gens:
+                print(f"  [E1b] {scheme_name:20s} N={N}: ALL {len(SEEDS_SMOKE)} SEEDS NON-FINITE (unstable)")
+                _record("E1b", scheme_name, N, 0.0, 0.0, None, extra="ALL SEEDS NON-FINITE (unstable)")
+                continue
+
+            cg = sum(corr_gens) / len(corr_gens)
+            ct = sum(corr_trues) / len(corr_trues)
+            kl = sum(kls) / len(kls)
+            vr = sum(var_ratios) / len(var_ratios)
+            unstable_note = f" [{n_nonfinite}/{len(SEEDS_SMOKE)} seeds non-finite]" if n_nonfinite else ""
+            _record("E1b", scheme_name, N, cg, ct, kl, extra=f"var_ratio={vr:.3f}{unstable_note}")
+
+
+def test_E2_full_scale_lam_verification(device, lam_values=(0.01,), tau=2.0):
+    print(f"\n=== E2: full-scale verification of winning lam (production N_TRAIN_ITERS=2000, N_SAMPLES=4000, 5 seeds, tau={tau}) ===")
+    dt_fixed = 1.0 / N_DIFF_STEPS_BASE
+    seeds_full = [0, 1, 2, 3, 4]
+    n_train_iters_full = 2000
+    n_samples_full = 4000
+    _setup_sweep_module(device, N_DIFF_STEPS_BASE, dt_fixed, n_train_iters_full, time_scale_fn=_constant_time_scale(tau))
+    for lam_value in lam_values:
+        lam_fn = _fixed_lam(lam_value)
+        scheme_name = f"[FULL SCALE] fixed_{lam_value}"
+        for N in N_SWEEP:
+            sigma_ab = sweep._get_sigma_n(N)
+            corr_gens, corr_trues, kls, var_ratios = [], [], [], []
+            n_nonfinite = 0
+            for seed in seeds_full:
+                torch.manual_seed(seed)
+                gt = make_ground_truth(N, COUPLING_STRENGTH, seed, 1.0, 1.0, device=device)
+                score_net, gs, gc, coupling, prior_std = _train_csho_custom_lam(N, sigma_ab, gt, device, lam_fn, n_train_iters_full)
+                sweep.N_SAMPLES = n_samples_full
+                generated = sweep.sample_csho_anderson(N, sigma_ab, score_net, gs, gc, coupling, prior_std, device)
+                if not torch.isfinite(generated).all():
+                    n_nonfinite += 1
+                    continue
+                m = evaluate_sampling_quality(generated, gt)
+                corr_gens.append(m["mean_pairwise_corr_gen"])
+                corr_trues.append(m["mean_pairwise_corr_true"])
+                kls.append(m["kl_divergence"])
+                mean_gen, cov_gen = fit_gaussian(generated.cpu())
+                cov_true = gt.stationary_covariance().cpu()
+                std_gen = cov_gen.diagonal().clamp_min(1e-12).sqrt()
+                std_true = cov_true.diagonal().clamp_min(1e-12).sqrt()
+                var_ratios.append((std_gen / std_true).mean().item())
+
+            if not corr_gens:
+                print(f"  [E2] {scheme_name:30s} N={N}: ALL {len(seeds_full)} SEEDS NON-FINITE (unstable)")
+                _record("E2", scheme_name, N, 0.0, 0.0, None, extra="ALL SEEDS NON-FINITE (unstable)")
+                continue
+
+            cg = sum(corr_gens) / len(corr_gens)
+            ct = sum(corr_trues) / len(corr_trues)
+            kl_mean = sum(kls) / len(kls)
+            kl_std = (sum((k - kl_mean) ** 2 for k in kls) / len(kls)) ** 0.5
+            vr = sum(var_ratios) / len(var_ratios)
+            unstable_note = f" [{n_nonfinite}/{len(seeds_full)} seeds non-finite]" if n_nonfinite else ""
+            _record("E2", scheme_name, N, cg, ct, kl_mean,
+                    extra=f"kl_std={kl_std:.4f} var_ratio={vr:.3f} (n={len(seeds_full)} seeds){unstable_note}")
+
+
 def print_summary():
     print("\n" + "=" * 100)
     print("SUMMARY (all groups)")
