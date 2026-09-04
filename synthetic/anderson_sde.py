@@ -29,12 +29,14 @@ def anderson_em_step_coupled_gamma(
     time_scale_fn: Optional[Callable[[torch.Tensor, int], torch.Tensor]] = None,
     scale_kinematics_with_time: bool = True,
     scale_diffusion_with_time: bool = True,
+    k_global_reference: float = 1.0,
 ):
     N = len(X)
     dV = drift_fn_coupled_gamma(
         X, V, K_self, K_global, t, T, alpha, beta, gamma_self, gamma_couple,
         coupling_matrix=coupling_matrix_drift, constant_k=constant_k,
         scale_damping_with_time=scale_damping_with_time, time_scale_fn=time_scale_fn,
+        k_global_reference=k_global_reference,
     )
     time_scale = _time_scale(t, T, time_scale_fn)
     kin_scale = time_scale if scale_kinematics_with_time else 1.0
@@ -87,6 +89,7 @@ def anderson_reverse_step_coupled_gamma(
     time_scale_fn: Optional[Callable[[torch.Tensor, int], torch.Tensor]] = None,
     scale_kinematics_with_time: bool = True,
     scale_diffusion_with_time: bool = True,
+    k_global_reference: float = 1.0,
 ):
     N = len(X)
     t_tensor = torch.as_tensor(t, device=X[0][0].device, dtype=X[0][0].dtype)
@@ -94,6 +97,7 @@ def anderson_reverse_step_coupled_gamma(
         X, V, K_self, K_global, t_tensor, T, alpha, beta, gamma_self, gamma_couple,
         coupling_matrix=coupling_matrix_drift, constant_k=constant_k,
         scale_damping_with_time=scale_damping_with_time, time_scale_fn=time_scale_fn,
+        k_global_reference=k_global_reference,
     )
     time_scale = _time_scale(t_tensor, T, time_scale_fn)
     kin_scale = time_scale if scale_kinematics_with_time else 1.0
