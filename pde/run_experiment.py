@@ -9,6 +9,7 @@ import torch
 import torch.nn.functional as F
 import yaml
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from core.baselines import (
     ddpm_forward_n, ddpm_reverse_step_n, make_ddpm_schedule, vp_beta_t, vp_sde_drift_n, vp_sde_reverse_step_n,
@@ -344,6 +345,8 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
 
     model.train()
     score_net.train()
+    total_steps = args.n_epochs * len(train_loader)
+    pbar = tqdm(total=total_steps, desc=f"[{args.problem}/{args.method}/{args.score_arch}] seed={seed}")
     for _epoch in range(args.n_epochs):
         for batch in train_loader:
             conditioning = batch["conditioning"].to(device)
@@ -420,6 +423,10 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
             else:
                 nan_events += 1
             n_steps += 1
+            pbar.set_postfix(epoch=f"{_epoch + 1}/{args.n_epochs}", loss=f"{loss.item():.4f}",
+                              nan=nan_events, explosion=explosion_events)
+            pbar.update(1)
+    pbar.close()
 
     if args.debug_rollout and hasattr(score_net, "output_gain"):
         gain = score_net.output_gain.detach().cpu().tolist()
