@@ -6,6 +6,8 @@ N_ITERS="${2:-10000}"
 N_SAMPLES="${3:-40000}"
 PDE_DATA_ROOT="${4:-/home/ubuntu/metis-v1-storage/CSHM-data/multiphysics}"
 PDE_N_EPOCHS="${5:-150}"
+PDE_N_DIFF_STEPS="${6:-32}"
+PDE_SEEDS="${7:-0,1,2,3,4,5,6,7,8,9}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
@@ -37,18 +39,20 @@ bash run_stepcount_sweep.sh "${N_SEEDS}" "${N_ITERS}" "${N_SAMPLES}"
 echo "############################################################"
 echo "### PHASE 2: pde/ multiphysics grid                       ###"
 echo "############################################################"
-echo "=== data-root: ${PDE_DATA_ROOT}, n-epochs: ${PDE_N_EPOCHS} ==="
+echo "=== data-root: ${PDE_DATA_ROOT}, n-epochs: ${PDE_N_EPOCHS}, n-diff-steps: ${PDE_N_DIFF_STEPS}, seeds: ${PDE_SEEDS} ==="
 
-PROBLEMS=(TE_heat E_flow VA)
+PROBLEMS=(TE_heat)
 METHODS=(csho ddpm sdm)
 ARCHES=(attention fno songunet)
-PDE_N_DIFF_STEPS=20
-PDE_BATCH_SIZE=64
-PDE_SEEDS="0,1,2,3,4"
 declare -A PDE_LR=(
   [attention]="0.001"
   [fno]="0.0003"
   [songunet]="0.001"
+)
+declare -A PDE_BATCH_SIZE=(
+  [attention]="512"
+  [fno]="128"
+  [songunet]="128"
 )
 
 for PROBLEM in "${PROBLEMS[@]}"; do
@@ -61,7 +65,7 @@ for PROBLEM in "${PROBLEMS[@]}"; do
         echo "--- ${PROBLEM} / ${METHOD} / ${ARCH}: already present at ${RESULT_FILE}, skipping ---"
         continue
       fi
-      echo "--- ${PROBLEM} / ${METHOD} / ${ARCH}: training (lr=${PDE_LR[${ARCH}]}) ---"
+      echo "--- ${PROBLEM} / ${METHOD} / ${ARCH}: training (lr=${PDE_LR[${ARCH}]}, batch-size=${PDE_BATCH_SIZE[${ARCH}]}) ---"
       python -m pde.run_experiment \
         --config pde/config.yaml \
         --data-root "${PDE_DATA_ROOT}" \
@@ -70,7 +74,7 @@ for PROBLEM in "${PROBLEMS[@]}"; do
         --score-arch "${ARCH}" \
         --n-epochs "${PDE_N_EPOCHS}" \
         --n-diff-steps "${PDE_N_DIFF_STEPS}" \
-        --batch-size "${PDE_BATCH_SIZE}" \
+        --batch-size "${PDE_BATCH_SIZE[${ARCH}]}" \
         --seeds "${PDE_SEEDS}" \
         --lr "${PDE_LR[${ARCH}]}" \
         --out-dir "${OUT_DIR}" \
