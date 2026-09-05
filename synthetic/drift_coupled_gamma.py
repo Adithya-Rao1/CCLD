@@ -69,6 +69,7 @@ def drift_fn_coupled_gamma(
     constant_k: bool = False,
     scale_damping_with_time: bool = True,
     time_scale_fn: Optional[Callable[[torch.Tensor, int], torch.Tensor]] = None,
+    k_global_reference: float = 1.0,
 ) -> List[List[torch.Tensor]]:
     N = len(X)
     if N < 1:
@@ -81,7 +82,7 @@ def drift_fn_coupled_gamma(
     if not constant_k:
         norm_f_k_global = time_scale * _mean_frob_norm(K_global)
     else:
-        norm_f_k_global = torch.as_tensor(1.0, device=X[0][0].device)
+        norm_f_k_global = torch.as_tensor(k_global_reference, device=X[0][0].device)
     omega_sq = [-(norm_f_k_self[i] + norm_f_k_global) for i in range(N)]
 
     if N == 1:
