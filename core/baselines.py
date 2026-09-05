@@ -73,14 +73,23 @@ def vp_sde_drift_n(X: List[torch.Tensor], beta_t: torch.Tensor) -> List[torch.Te
     return [-0.5 * beta_t * x for x in X]
 
 
-def vp_sde_forward_step_n(
-    X: List[torch.Tensor], beta_t: torch.Tensor, dt: float,
-) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
-    drift = vp_sde_drift_n(X, beta_t)
-    g = torch.sqrt(beta_t)
-    noise = [torch.randn_like(x) for x in X]
-    X_next = [x + d * dt + g * math.sqrt(dt) * z for x, d, z in zip(X, drift, noise)]
-    return X_next, noise
+def vp_alpha_bar(t: torch.Tensor, beta_min: float = 0.1, beta_max: float = 20.0) -> torch.Tensor:
+    integral = beta_min * t + 0.5 * (beta_max - beta_min) * t ** 2
+    return torch.exp(-integral)
+
+
+def vp_sde_forward_marginal(x0: torch.Tensor, t: torch.Tensor, beta_min: float = 0.1, beta_max: float = 20.0):
+    ac_t = vp_alpha_bar(t, beta_min, beta_max)
+    noise = torch.randn_like(x0)
+    x_t = torch.sqrt(ac_t) * x0 + torch.sqrt(1.0 - ac_t) * noise
+    return x_t, noise
+
+
+def vp_sde_forward_marginal_n(X0: List[torch.Tensor], t: torch.Tensor, beta_min: float = 0.1, beta_max: float = 20.0):
+    out = [vp_sde_forward_marginal(x0, t, beta_min, beta_max) for x0 in X0]
+    X_t = [o[0] for o in out]
+    noise = [o[1] for o in out]
+    return X_t, noise
 
 
 def vp_sde_reverse_step_n(
