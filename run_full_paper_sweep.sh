@@ -8,14 +8,31 @@ PDE_DATA_ROOT="${4:-/home/ubuntu/metis-v1-storage/CSHM-data/multiphysics}"
 PDE_N_EPOCHS="${5:-150}"
 PDE_N_DIFF_STEPS="${6:-32}"
 PDE_SEEDS="${7:-0,1,2,3,4,5,6,7,8,9}"
+PDE_NUM_WORKERS="${8:-16}"
+PDE_ARCHES="${9:-attention,fno,songunet}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
 
+PROBLEMS=(TE_heat)
+METHODS=(csho ddpm sdm)
+IFS=',' read -ra ARCHES <<< "${PDE_ARCHES}"
+declare -A PDE_LR=(
+  [attention]="0.01"
+  [fno]="0.003"
+  [songunet]="0.01"
+)
+declare -A PDE_BATCH_SIZE=(
+  [attention]="1024"
+  [fno]="256"
+  [songunet]="256"
+)
+
 echo "############################################################"
 echo "### Pre-flight: checking pde/ score-arch dependencies    ###"
 echo "############################################################"
-python -c "
+if [[ " ${ARCHES[*]} " == *" fno "* || " ${ARCHES[*]} " == *" songunet "* ]]; then
+  python -c "
 import sys
 try:
     import neuralop  # noqa: F401
@@ -30,6 +47,9 @@ except Exception as e:
     sys.exit(1)
 print('OK: fno and songunet dependencies import cleanly.')
 " || exit 1
+else
+  echo "Skipping fno/songunet dependency check -- not in ARCHES=(${ARCHES[*]})."
+fi
 
 echo "############################################################"
 echo "### PHASE 1: synthetic/ step-count x N=2..5 sweep         ###"
@@ -39,21 +59,7 @@ bash run_stepcount_sweep.sh "${N_SEEDS}" "${N_ITERS}" "${N_SAMPLES}"
 echo "############################################################"
 echo "### PHASE 2: pde/ multiphysics grid                       ###"
 echo "############################################################"
-echo "=== data-root: ${PDE_DATA_ROOT}, n-epochs: ${PDE_N_EPOCHS}, n-diff-steps: ${PDE_N_DIFF_STEPS}, seeds: ${PDE_SEEDS} ==="
-
-PROBLEMS=(TE_heat)
-METHODS=(csho ddpm sdm)
-ARCHES=(attention fno songunet)
-declare -A PDE_LR=(
-  [attention]="0.001"
-  [fno]="0.0003"
-  [songunet]="0.001"
-)
-declare -A PDE_BATCH_SIZE=(
-  [attention]="512"
-  [fno]="128"
-  [songunet]="128"
-)
+echo "=== data-root: ${PDE_DATA_ROOT}, n-epochs: ${PDE_N_EPOCHS}, n-diff-steps: ${PDE_N_DIFF_STEPS}, seeds: ${PDE_SEEDS}, num-workers: ${PDE_NUM_WORKERS}, arches: ${ARCHES[*]} ==="
 
 for PROBLEM in "${PROBLEMS[@]}"; do
   for ARCH in "${ARCHES[@]}"; do
@@ -77,6 +83,7 @@ for PROBLEM in "${PROBLEMS[@]}"; do
         --batch-size "${PDE_BATCH_SIZE[${ARCH}]}" \
         --seeds "${PDE_SEEDS}" \
         --lr "${PDE_LR[${ARCH}]}" \
+        --num-workers "${PDE_NUM_WORKERS}" \
         --out-dir "${OUT_DIR}" \
         || echo "!!! FAILED: ${PROBLEM} / ${METHOD} / ${ARCH} -- see output above, continuing with the rest of the grid !!!"
     done

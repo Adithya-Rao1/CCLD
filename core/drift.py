@@ -52,6 +52,7 @@ def drift_fn_n(
     constant_k: bool = False,
     scale_damping_with_time: bool = True,
     time_scale_fn: Optional[Callable[[torch.Tensor, int], torch.Tensor]] = None,
+    k_global_reference: float = 1.0,
 ) -> List[List[torch.Tensor]]:
     N = len(X)
     if N < 2:
@@ -68,7 +69,7 @@ def drift_fn_n(
     if not constant_k:
         norm_f_k_global = time_scale * _mean_frob_norm(K_global)
     else:
-        norm_f_k_global = torch.as_tensor(1.0, device=X[0][0].device)
+        norm_f_k_global = torch.as_tensor(k_global_reference, device=X[0][0].device)
 
     omega_sq = [-(norm_f_k_self[i] + norm_f_k_global) for i in range(N)]
     m = [_mean_per_sample(X[i]) for i in range(N)]  # each m[i] has shape (B,)
