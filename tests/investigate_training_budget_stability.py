@@ -11,7 +11,7 @@ import scipy.io as sio
 
 from pde.run_experiment import parse_args, train_one_seed
 
-SCORE_ARCHES = ["attention", "fno", "songunet"]
+SCORE_ARCHES = ["attention", "fno", "unet_model"]
 PROBLEMS = ["TE_heat", "E_flow", "VA"]
 N_EPOCHS_GRID = [5, 20, 50, 100]  # 50 matches production (A2)
 
@@ -26,8 +26,8 @@ _ARCH_ARGS = {  # A3, moderate configs
                   "--latent-dim", "32", "--score-blocks", "2", "--score-heads", "2"],
     "fno": ["--score-arch", "fno", "--fno-modes", "8,8", "--fno-hidden-channels", "64",
             "--fno-init-channels", "16", "--base-channels", "16", "--n-downsample", "2"],
-    "songunet": ["--score-arch", "songunet", "--songunet-model-channels", "16",
-                 "--songunet-channel-mult", "1,2", "--songunet-num-blocks", "2",
+    "unet_model": ["--score-arch", "unet_model", "--unet-model-channels", "16",
+                 "--unet-channel-mult", "1,2", "--unet-num-blocks", "2",
                  "--fno-init-channels", "16", "--base-channels", "16", "--n-downsample", "2"],
 }
 

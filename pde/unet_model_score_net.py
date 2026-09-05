@@ -5,7 +5,7 @@ from typing import List
 import torch
 import torch.nn as nn
 
-from pde.vendored_songunet import SongUNet
+from pde.vendored_unet_model import UNetModel
 
 
 def _parse_channel_mult(s) -> List[int]:
@@ -14,7 +14,7 @@ def _parse_channel_mult(s) -> List[int]:
     return [int(v) for v in str(s).split(",") if v.strip()]
 
 
-class SongUNetScoreNetwork(nn.Module):
+class UNetModelScoreNetwork(nn.Module):
     def __init__(
         self,
         n_tasks: int,
@@ -30,7 +30,7 @@ class SongUNetScoreNetwork(nn.Module):
         self.n_tasks = n_tasks
         self.n_diff_steps = n_diff_steps
         in_ch = 2 * n_tasks + cond_in_ch  # X channels + V channels + t channels 
-        self.net = SongUNet(
+        self.net = UNetModel(
             img_resolution=img_resolution, in_channels=in_ch, out_channels=n_tasks, label_dim=0,
             model_channels=model_channels, channel_mult=_parse_channel_mult(channel_mult),
             channel_mult_emb=4, num_blocks=num_blocks, attn_resolutions=list(attn_resolutions),
@@ -54,7 +54,7 @@ class SongUNetScoreNetwork(nn.Module):
         return [[out[:, i:i + 1]] for i in range(self.n_tasks)]
 
 
-class FlatSongUNetScoreNetwork(nn.Module):
+class FlatUNetModelScoreNetwork(nn.Module):
     def __init__(
         self,
         n_tasks: int,
@@ -70,7 +70,7 @@ class FlatSongUNetScoreNetwork(nn.Module):
         self.n_tasks = n_tasks
         self.n_diff_steps = n_diff_steps
         in_ch = n_tasks + cond_in_ch
-        self.net = SongUNet(
+        self.net = UNetModel(
             img_resolution=img_resolution, in_channels=in_ch, out_channels=n_tasks, label_dim=0,
             model_channels=model_channels, channel_mult=_parse_channel_mult(channel_mult),
             channel_mult_emb=4, num_blocks=num_blocks, attn_resolutions=list(attn_resolutions),
@@ -86,9 +86,9 @@ class FlatSongUNetScoreNetwork(nn.Module):
         return list(out.split(1, dim=1))
 
 
-def make_songunet_score_fn(score_net: SongUNetScoreNetwork, conditioning: torch.Tensor):
+def make_unet_model_score_fn(score_net: UNetModelScoreNetwork, conditioning: torch.Tensor):
     return lambda X, V_query, t: score_net(conditioning, X, V_query, t)
 
 
-def make_flat_songunet_score_fn(score_net: FlatSongUNetScoreNetwork, conditioning: torch.Tensor):
+def make_flat_unet_model_score_fn(score_net: FlatUNetModelScoreNetwork, conditioning: torch.Tensor):
     return lambda X, t: score_net(conditioning, X, t)

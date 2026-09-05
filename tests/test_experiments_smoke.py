@@ -345,19 +345,19 @@ def test_experiment_2_physics_smoke_va_fno():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-_SONGUNET_ARGS = [
-    "--score-arch", "songunet", "--songunet-model-channels", "8", "--songunet-channel-mult", "1,2",
-    "--songunet-num-blocks", "1", "--songunet-attn-resolutions", "", "--fno-init-channels", "8",
+_UNET_MODEL_ARGS = [
+    "--score-arch", "unet_model", "--unet-model-channels", "8", "--unet-channel-mult", "1,2",
+    "--unet-num-blocks", "1", "--unet-attn-resolutions", "", "--fno-init-channels", "8",
     "--base-channels", "8", "--n-downsample", "1",
 ]
 
 
-def test_experiment_2_physics_smoke_e_flow_songunet():
+def test_experiment_2_physics_smoke_e_flow_unet_model():
     import scipy.io as sio
 
     from pde.run_experiment import parse_args, train_one_seed
 
-    tmp = tempfile.mkdtemp(prefix="csho_smoke_exp2_eflow_songunet_")
+    tmp = tempfile.mkdtemp(prefix="csho_smoke_exp2_eflow_unet_model_")
     try:
         rng = np.random.default_rng(0)
         problem_root = os.path.join(tmp, "training", "E_flow")
@@ -370,7 +370,7 @@ def test_experiment_2_physics_smoke_e_flow_songunet():
         argv = [
             "--data-root", tmp, "--problem", "E_flow", "--method", "csho", "--n-diff-steps", "2",
             "--batch-size", "2", "--n-epochs", "1", "--seeds", "0", "--max-samples", "10", "--image-size", "16",
-            *_SONGUNET_ARGS, "--num-workers", "0", "--device", "cpu", "--out-dir", os.path.join(tmp, "out"),
+            *_UNET_MODEL_ARGS, "--num-workers", "0", "--device", "cpu", "--out-dir", os.path.join(tmp, "out"),
         ]
         args = parse_args(argv)
         metrics = train_one_seed(args, seed=0)
@@ -381,12 +381,12 @@ def test_experiment_2_physics_smoke_e_flow_songunet():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def test_experiment_2_physics_smoke_e_flow_songunet_ddpm():
+def test_experiment_2_physics_smoke_e_flow_unet_model_ddpm():
     import scipy.io as sio
 
     from pde.run_experiment import parse_args, train_one_seed
 
-    tmp = tempfile.mkdtemp(prefix="csho_smoke_exp2_eflow_songunet_ddpm_")
+    tmp = tempfile.mkdtemp(prefix="csho_smoke_exp2_eflow_unet_model_ddpm_")
     try:
         rng = np.random.default_rng(0)
         problem_root = os.path.join(tmp, "training", "E_flow")
@@ -399,7 +399,7 @@ def test_experiment_2_physics_smoke_e_flow_songunet_ddpm():
         argv = [
             "--data-root", tmp, "--problem", "E_flow", "--method", "ddpm", "--n-diff-steps", "2",
             "--batch-size", "2", "--n-epochs", "1", "--seeds", "0", "--max-samples", "10", "--image-size", "16",
-            *_SONGUNET_ARGS, "--num-workers", "0", "--device", "cpu", "--out-dir", os.path.join(tmp, "out"),
+            *_UNET_MODEL_ARGS, "--num-workers", "0", "--device", "cpu", "--out-dir", os.path.join(tmp, "out"),
         ]
         args = parse_args(argv)
         metrics = train_one_seed(args, seed=0)
@@ -410,12 +410,12 @@ def test_experiment_2_physics_smoke_e_flow_songunet_ddpm():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def test_experiment_2_physics_smoke_te_heat_songunet():
+def test_experiment_2_physics_smoke_te_heat_unet_model():
     import scipy.io as sio
 
     from pde.run_experiment import parse_args, train_one_seed
 
-    tmp = tempfile.mkdtemp(prefix="csho_smoke_exp2_teheat_songunet_")
+    tmp = tempfile.mkdtemp(prefix="csho_smoke_exp2_teheat_unet_model_")
     try:
         rng = np.random.default_rng(0)
         problem_root = os.path.join(tmp, "training", "TE_heat")
@@ -437,7 +437,7 @@ def test_experiment_2_physics_smoke_te_heat_songunet():
         argv = [
             "--data-root", tmp, "--problem", "TE_heat", "--method", "csho", "--n-diff-steps", "2",
             "--batch-size", "2", "--n-epochs", "1", "--seeds", "0", "--max-samples", "10", "--image-size", "16",
-            *_SONGUNET_ARGS, "--num-workers", "0", "--device", "cpu", "--out-dir", os.path.join(tmp, "out"),
+            *_UNET_MODEL_ARGS, "--num-workers", "0", "--device", "cpu", "--out-dir", os.path.join(tmp, "out"),
         ]
         args = parse_args(argv)
         metrics = train_one_seed(args, seed=0)
@@ -448,12 +448,12 @@ def test_experiment_2_physics_smoke_te_heat_songunet():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def test_experiment_2_physics_smoke_va_songunet():
+def test_experiment_2_physics_smoke_va_unet_model():
     import scipy.io as sio
 
     from pde.run_experiment import parse_args, train_one_seed
 
-    tmp = tempfile.mkdtemp(prefix="csho_smoke_exp2_va_songunet_")
+    tmp = tempfile.mkdtemp(prefix="csho_smoke_exp2_va_unet_model_")
     try:
         rng = np.random.default_rng(0)
         problem_root = os.path.join(tmp, "training", "VA")
@@ -471,7 +471,7 @@ def test_experiment_2_physics_smoke_va_songunet():
         argv = [
             "--data-root", tmp, "--problem", "VA", "--method", "csho", "--n-diff-steps", "2",
             "--batch-size", "2", "--n-epochs", "1", "--seeds", "0", "--max-samples", "10", "--image-size", "16",
-            *_SONGUNET_ARGS, "--num-workers", "0", "--device", "cpu", "--out-dir", os.path.join(tmp, "out"),
+            *_UNET_MODEL_ARGS, "--num-workers", "0", "--device", "cpu", "--out-dir", os.path.join(tmp, "out"),
         ]
         args = parse_args(argv)
         metrics = train_one_seed(args, seed=0)
@@ -519,14 +519,14 @@ if __name__ == "__main__":
     print("OK: experiment_2_physics (TE_heat, score-arch=fno, csho) smoke test passed.")
     test_experiment_2_physics_smoke_va_fno()
     print("OK: experiment_2_physics (VA, score-arch=fno, csho) smoke test passed.")
-    test_experiment_2_physics_smoke_e_flow_songunet()
-    print("OK: experiment_2_physics (E_flow, score-arch=songunet, csho) smoke test passed.")
-    test_experiment_2_physics_smoke_e_flow_songunet_ddpm()
-    print("OK: experiment_2_physics (E_flow, score-arch=songunet, ddpm) smoke test passed.")
-    test_experiment_2_physics_smoke_te_heat_songunet()
-    print("OK: experiment_2_physics (TE_heat, score-arch=songunet, csho) smoke test passed.")
-    test_experiment_2_physics_smoke_va_songunet()
-    print("OK: experiment_2_physics (VA, score-arch=songunet, csho) smoke test passed.")
+    test_experiment_2_physics_smoke_e_flow_unet_model()
+    print("OK: experiment_2_physics (E_flow, score-arch=unet_model, csho) smoke test passed.")
+    test_experiment_2_physics_smoke_e_flow_unet_model_ddpm()
+    print("OK: experiment_2_physics (E_flow, score-arch=unet_model, ddpm) smoke test passed.")
+    test_experiment_2_physics_smoke_te_heat_unet_model()
+    print("OK: experiment_2_physics (TE_heat, score-arch=unet_model, csho) smoke test passed.")
+    test_experiment_2_physics_smoke_va_unet_model()
+    print("OK: experiment_2_physics (VA, score-arch=unet_model, csho) smoke test passed.")
     test_experiment_3_synthetic_smoke()
     print("OK: experiment_3_synthetic smoke test passed.")
     print("ALL EXPERIMENT SMOKE TESTS PASSED.")

@@ -7,12 +7,12 @@ N_EPOCHS="${2:-50}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
 
-ARCHES=(fno songunet)
+ARCHES=(fno unet_model)
 LRS=(0.0001 0.0003 0.001 0.003)
 
 echo "############################################################"
 echo "### LR sanity check (post closed-form/FDT recalibration) ###"
-echo "### TE_heat/csho/{fno,songunet}                           ###"
+echo "### TE_heat/csho/{fno,unet_model}                           ###"
 echo "### n_epochs=${N_EPOCHS}, seed=0, lr in {${LRS[*]}}      ###"
 echo "############################################################"
 
@@ -44,7 +44,7 @@ python -c "
 import json, os, glob
 
 rows = []
-for arch in ['fno', 'songunet']:
+for arch in ['fno', 'unet_model']:
     for lr in ['0.0001', '0.0003', '0.001', '0.003']:
         path = f'results/lr_sanity_check_v2/TE_heat_csho_{arch}_lr{lr}/csho_results.json'
         if not os.path.exists(path):

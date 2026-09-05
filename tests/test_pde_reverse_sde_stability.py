@@ -12,12 +12,12 @@ import torch.nn.functional as F
 from pde.fno_score_net import FNOScoreNetwork, FlatFNOScoreNetwork
 from pde.model import FlatScoreNetwork, MultiPhysicsScoreNetwork, PhysicsModel, SpatialFieldModel
 from pde.run_experiment import _build_score_fns, _encode_state, build_method_state
-from pde.songunet_score_net import FlatSongUNetScoreNetwork, SongUNetScoreNetwork
+from pde.unet_model_score_net import FlatUNetModelScoreNetwork, UNetModelScoreNetwork
 from synthetic.anderson_sde import anderson_reverse_step_coupled_gamma
 from synthetic.drift_coupled_gamma import calibrate_coupled_gammas, calibrate_sigma_fdt_coupled
 from synthetic.exact_dsm import precompute_transition_params, sample_and_tikhonov_score_target
 
-SCORE_ARCHES = ["attention", "fno", "songunet"]
+SCORE_ARCHES = ["attention", "fno", "unet_model"]
 PROBLEMS = ["TE_heat", "E_flow", "VA"]
 
 PROBLEM_TASK_NAMES = {
@@ -57,7 +57,7 @@ def _make_args(score_arch: str, n_diff_steps: int, dt: float) -> argparse.Namesp
 
 def _build_model_and_score_net(score_arch: str, task_names: List[str], n_diff_steps: int, device):
     N = len(task_names)
-    is_spatial = score_arch in ("fno", "songunet")
+    is_spatial = score_arch in ("fno", "unet_model")
     if is_spatial:
         model = SpatialFieldModel(
             task_names, cond_in_ch=COND_IN_CH, out_hw=(IMAGE_SIZE, IMAGE_SIZE),
@@ -73,8 +73,8 @@ def _build_model_and_score_net(score_arch: str, task_names: List[str], n_diff_st
         score_net = FNOScoreNetwork(
             N, COND_IN_CH, n_diff_steps, n_modes=(8, 8), hidden_channels=16,
         ).to(device)
-    elif score_arch == "songunet":
-        score_net = SongUNetScoreNetwork(
+    elif score_arch == "unet_model":
+        score_net = UNetModelScoreNetwork(
             N, COND_IN_CH, n_diff_steps, img_resolution=IMAGE_SIZE,
             model_channels=8, channel_mult=(1, 2), num_blocks=1, attn_resolutions=(),
         ).to(device)
@@ -99,7 +99,7 @@ def _state_norm(X: List[List[torch.Tensor]]) -> float:
 ATTENTION_LATENT_DIM = 16 
 
 def _prior_state_shape(score_arch: str):
-    if score_arch in ("fno", "songunet"):
+    if score_arch in ("fno", "unet_model"):
         return (BATCH, 1, IMAGE_SIZE, IMAGE_SIZE)
     return (BATCH, ATTENTION_LATENT_DIM)
 

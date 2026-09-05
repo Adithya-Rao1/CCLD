@@ -41,8 +41,8 @@ from pde.model import (
     FlatScoreNetwork, MultiPhysicsScoreNetwork, PhysicsModel, SpatialFieldModel, make_flat_score_fn, make_score_fn,
 )
 from pde.fno_score_net import FNOScoreNetwork, FlatFNOScoreNetwork, make_spatial_score_fn, make_flat_fno_score_fn
-from pde.songunet_score_net import (
-    SongUNetScoreNetwork, FlatSongUNetScoreNetwork, make_songunet_score_fn, make_flat_songunet_score_fn,
+from pde.unet_model_score_net import (
+    UNetModelScoreNetwork, FlatUNetModelScoreNetwork, make_unet_model_score_fn, make_flat_unet_model_score_fn,
 )
 
 METHOD_CONFIGS = {
@@ -106,18 +106,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--n-downsample", type=int, default=3)
     p.add_argument("--score-blocks", type=int, default=3)
     p.add_argument("--score-heads", type=int, default=4)
-    p.add_argument("--score-arch", default="attention", choices=["attention", "fno", "songunet"],
+    p.add_argument("--score-arch", default="attention", choices=["attention", "fno", "unet_model"],
                     help="'attention' = existing pooled-latent MultiPhysicsScoreNetwork; "
-                         "'fno'/'songunet' = native-pixel-diffusion (X+V-conditioned) score networks")
+                         "'fno'/'unet_model' = native-pixel-diffusion (X+V-conditioned) score networks")
     p.add_argument("--fno-modes", default="12,12")
     p.add_argument("--fno-hidden-channels", type=int, default=128)
     p.add_argument("--fno-init-channels", type=int, default=32,
-                    help="SpatialFieldModel's init-head hidden channels -- shared by fno and songunet, "
+                    help="SpatialFieldModel's init-head hidden channels -- shared by fno and unet_model, "
                          "both use the same native-pixel-diffusion state representation")
-    p.add_argument("--songunet-model-channels", type=int, default=32)
-    p.add_argument("--songunet-channel-mult", default="1,2,2")
-    p.add_argument("--songunet-num-blocks", type=int, default=2)
-    p.add_argument("--songunet-attn-resolutions", default="16")
+    p.add_argument("--unet-model-channels", type=int, default=32)
+    p.add_argument("--unet-channel-mult", default="1,2,2")
+    p.add_argument("--unet-num-blocks", type=int, default=2)
+    p.add_argument("--unet-attn-resolutions", default="16")
     p.add_argument("--lambda-tikhonov", type=float, default=1.0)
     p.add_argument("--explode-threshold", type=float, default=1e3)
     p.add_argument("--max-hook-modules", type=int, default=200)
@@ -222,8 +222,8 @@ def _encode_state(args, model, task_names, model_conditioning, is_spatial: bool)
 def _build_score_fns(args, score_net, conditioning):
     if args.score_arch == "fno":
         return make_spatial_score_fn(score_net, conditioning), make_flat_fno_score_fn(score_net, conditioning)
-    if args.score_arch == "songunet":
-        return make_songunet_score_fn(score_net, conditioning), make_flat_songunet_score_fn(score_net, conditioning)
+    if args.score_arch == "unet_model":
+        return make_unet_model_score_fn(score_net, conditioning), make_flat_unet_model_score_fn(score_net, conditioning)
     return make_score_fn(score_net, conditioning), make_flat_score_fn(score_net, conditioning)
 
 
@@ -277,10 +277,10 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
                              num_workers=args.num_workers, collate_fn=collate_fn)
 
-    is_spatial = args.score_arch in ("fno", "songunet")
+    is_spatial = args.score_arch in ("fno", "unet_model")
     fno_modes = tuple(int(v) for v in args.fno_modes.split(","))
-    songunet_channel_mult = tuple(int(v) for v in args.songunet_channel_mult.split(","))
-    songunet_attn_res = tuple(int(v) for v in args.songunet_attn_resolutions.split(",")) if args.songunet_attn_resolutions else ()
+    unet_channel_mult = tuple(int(v) for v in args.unet_channel_mult.split(","))
+    unet_attn_res = tuple(int(v) for v in args.unet_attn_resolutions.split(",")) if args.unet_attn_resolutions else ()
     cond_in_ch = train_ds[0]["conditioning"].shape[0]
     if is_spatial:
         model = SpatialFieldModel(task_names, cond_in_ch=cond_in_ch, out_hw=(args.image_size, args.image_size),
@@ -299,17 +299,17 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
         else:
             score_net = FlatFNOScoreNetwork(N, cond_in_ch, args.n_diff_steps, n_modes=fno_modes,
                                              hidden_channels=args.fno_hidden_channels).to(device)
-    elif args.score_arch == "songunet":
+    elif args.score_arch == "unet_model":
         if is_csho:
-            score_net = SongUNetScoreNetwork(N, cond_in_ch, args.n_diff_steps, img_resolution=args.image_size,
-                                              model_channels=args.songunet_model_channels,
-                                              channel_mult=songunet_channel_mult, num_blocks=args.songunet_num_blocks,
-                                              attn_resolutions=songunet_attn_res).to(device)
+            score_net = UNetModelScoreNetwork(N, cond_in_ch, args.n_diff_steps, img_resolution=args.image_size,
+                                              model_channels=args.unet_model_channels,
+                                              channel_mult=unet_channel_mult, num_blocks=args.unet_num_blocks,
+                                              attn_resolutions=unet_attn_res).to(device)
         else:
-            score_net = FlatSongUNetScoreNetwork(N, cond_in_ch, args.n_diff_steps, img_resolution=args.image_size,
-                                                  model_channels=args.songunet_model_channels,
-                                                  channel_mult=songunet_channel_mult, num_blocks=args.songunet_num_blocks,
-                                                  attn_resolutions=songunet_attn_res).to(device)
+            score_net = FlatUNetModelScoreNetwork(N, cond_in_ch, args.n_diff_steps, img_resolution=args.image_size,
+                                                  model_channels=args.unet_model_channels,
+                                                  channel_mult=unet_channel_mult, num_blocks=args.unet_num_blocks,
+                                                  attn_resolutions=unet_attn_res).to(device)
     elif is_csho:
         score_net = MultiPhysicsScoreNetwork(N, args.latent_dim, model.backbone.out_ch,
                                               n_blocks=args.score_blocks, n_heads=args.score_heads).to(device)

@@ -9,7 +9,7 @@ PDE_N_EPOCHS="${5:-150}"
 PDE_N_DIFF_STEPS="${6:-32}"
 PDE_SEEDS="${7:-0,1,2,3,4,5,6,7,8,9}"
 PDE_NUM_WORKERS="${8:-16}"
-PDE_ARCHES="${9:-attention,fno,songunet}"
+PDE_ARCHES="${9:-attention,fno,unet_model}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
@@ -20,18 +20,18 @@ IFS=',' read -ra ARCHES <<< "${PDE_ARCHES}"
 declare -A PDE_LR=(
   [attention]="0.01"
   [fno]="0.003"
-  [songunet]="0.01"
+  [unet_model]="0.01"
 )
 declare -A PDE_BATCH_SIZE=(
   [attention]="1024"
   [fno]="256"
-  [songunet]="256"
+  [unet_model]="256"
 )
 
 echo "############################################################"
 echo "### Pre-flight: checking pde/ score-arch dependencies    ###"
 echo "############################################################"
-if [[ " ${ARCHES[*]} " == *" fno "* || " ${ARCHES[*]} " == *" songunet "* ]]; then
+if [[ " ${ARCHES[*]} " == *" fno "* || " ${ARCHES[*]} " == *" unet_model "* ]]; then
   python -c "
 import sys
 try:
@@ -41,14 +41,14 @@ except ImportError:
     print('        pip install neuraloperator')
     sys.exit(1)
 try:
-    from pde.songunet_score_net import SongUNetScoreNetwork  # noqa: F401
+    from pde.unet_model_score_net import UNetModelScoreNetwork  # noqa: F401
 except Exception as e:
-    print(f'FATAL: pde/songunet_score_net.py failed to import (needed for --score-arch songunet): {e}')
+    print(f'FATAL: pde/unet_model_score_net.py failed to import (needed for --score-arch unet_model): {e}')
     sys.exit(1)
-print('OK: fno and songunet dependencies import cleanly.')
+print('OK: fno and unet_model dependencies import cleanly.')
 " || exit 1
 else
-  echo "Skipping fno/songunet dependency check -- not in ARCHES=(${ARCHES[*]})."
+  echo "Skipping fno/unet_model dependency check -- not in ARCHES=(${ARCHES[*]})."
 fi
 
 echo "############################################################"

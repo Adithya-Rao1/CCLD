@@ -190,7 +190,7 @@ class FourierEmbedding(torch.nn.Module):
         return x
 
 
-class SongUNet(torch.nn.Module):
+class UNetModel(torch.nn.Module):
     def __init__(self,
         img_resolution,                     
         in_channels,                        

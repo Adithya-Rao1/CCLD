@@ -331,17 +331,19 @@ authoritative):
 
 ## 9. Score-network architecture ablation (`--score-arch`)
 
-`--score-arch {attention, fno, songunet}` (default `attention`) selects the network that predicts
+`--score-arch {attention, fno, unet_model}` (default `attention`) selects the network that predicts
 scores during CSHO/DDPM/SDM training and sampling, for `TE_heat`, `E_flow`, `VA`. `attention` is
 the original, unchanged pipeline (`pde/model.py::PhysicsModel`/`MultiPhysicsScoreNetwork` -- a
 pooled per-task latent vector `(B, latent_dim)`, refined via cross-field attention). `fno` and
-`songunet` are new, and share the same **native-pixel diffusion** state representation: each
+`unet_model` are new, and share the same **native-pixel diffusion** state representation: each
 task's diffused state is the full field itself, `(B, 1, H, W)`, with no latent-vector bottleneck.
 `fno` denoises with an FNO (`pde/fno_score_net.py`, needs `neuraloperator`:
-`pip install neuraloperator`); `songunet` denoises with DiffusionPDE's `SongUNet`
-(`pde/songunet_score_net.py`, using `pde/vendored_songunet.py` -- no extra dependency).
+`pip install neuraloperator`); `unet_model` denoises with `UNetModel`, the standard score-SDE
+U-Net (Song et al. / NVIDIA EDM lineage; DiffusionPDE reused it unmodified as their backbone, and
+this port vendors the same architecture, renamed here since nothing about it is DiffusionPDE-specific)
+(`pde/unet_model_score_net.py`, using `pde/vendored_unet_model.py` -- no extra dependency).
 
-`pde/vendored_songunet.py` is a **plain copy** of `SongUNet` and its dependencies
+`pde/vendored_unet_model.py` is a **plain copy** of `UNetModel` and its dependencies
 (`UNetBlock`, `AttentionOp`, `PositionalEmbedding`, `FourierEmbedding`, etc.) from
 `pde/multiphysics-bench/DiffusionPDE/training/networks.py`, with the `@persistence.persistent_class`
 decorators dropped (a `torch_utils`/`dnnlib`-dependent pickle-portability mechanism for
@@ -349,7 +351,7 @@ DiffusionPDE's own checkpoint format, never used here). **Not imported from the 
 at runtime, because `pde/multiphysics-bench` is a nested git repo the outer CoupledSHO repo only
 tracks as a gitlink (`git ls-tree` shows mode `160000`, no `.gitmodules`) -- a plain
 `git clone`/`git pull` of this repo does not bring that nested repo's file content along, which
-broke `--score-arch songunet` with `ModuleNotFoundError: No module named 'training'` on a fresh
+broke `--score-arch unet_model` with `ModuleNotFoundError: No module named 'training'` on a fresh
 remote checkout. Vendoring the specific classes actually needed as tracked files sidesteps this
 entirely; `pde/multiphysics-bench` is still cloned locally for reference/verification (e.g.
 `pde_residuals.py`'s residual formulas were checked against its PINN loss functions) but nothing
@@ -363,19 +365,19 @@ python -m pde.run_experiment \
 
 python -m pde.run_experiment \
   --config pde/config.yaml --data-root /data/multiphysics --problem TE_heat \
-  --method csho --score-arch songunet --seeds 0,1,2,3,4 \
-  --out-dir results/experiment_2_physics/TE_heat_csho_songunet
+  --method csho --score-arch unet_model --seeds 0,1,2,3,4 \
+  --out-dir results/experiment_2_physics/TE_heat_csho_unet_model
 ```
 
 `--fno-modes` (default `"12,12"`), `--fno-hidden-channels` (default 128), `--fno-init-channels`
-(default 32, shared by `fno`/`songunet` -- see below) tune the FNO; `n_modes` must not exceed the
-working resolution (`--image-size`). `--songunet-model-channels` (default 32),
-`--songunet-channel-mult` (default `"1,2,2"`), `--songunet-num-blocks` (default 2),
-`--songunet-attn-resolutions` (default `"16"`, comma-separated, empty string for none) tune
-SongUNet -- `channel_mult`'s length is the number of downsampling stages, so it must stay small
+(default 32, shared by `fno`/`unet_model` -- see below) tune the FNO; `n_modes` must not exceed the
+working resolution (`--image-size`). `--unet-model-channels` (default 32),
+`--unet-channel-mult` (default `"1,2,2"`), `--unet-num-blocks` (default 2),
+`--unet-attn-resolutions` (default `"16"`, comma-separated, empty string for none) tune
+UNetModel -- `channel_mult`'s length is the number of downsampling stages, so it must stay small
 enough that `--image-size` doesn't collapse to 0 (e.g. 3 entries needs `--image-size >= 8`).
 
-**Why `fno`/`songunet` needed real architecture changes, not just a network swap.** Read through
+**Why `fno`/`unet_model` needed real architecture changes, not just a network swap.** Read through
 `pde/model.py`/`pde/run_experiment.py` before starting this phase and found the `attention` path
 doesn't do textbook noise-to-data generative sampling: `PhysicsModel.encode(conditioning)`
 produces a *deterministic* per-task starting point (no randomness), and the reverse SDE
@@ -384,20 +386,20 @@ produces a *deterministic* per-task starting point (no randomness), and the reve
 `V` (`make_score_fn`'s closure silently drops the `X` argument every caller already supplies). This
 was a placeholder limitation, not a design choice to preserve, so both new score networks fix it
 by construction: `pde/fno_score_net.py::FNOScoreNetwork` and
-`pde/songunet_score_net.py::SongUNetScoreNetwork` condition on **both** `X` and `V` (plus the raw
+`pde/unet_model_score_net.py::UNetModelScoreNetwork` condition on **both** `X` and `V` (plus the raw
 conditioning field and timestep) at every step, matching proper critically-damped-Langevin-style
-scoring (`score(x_t, v_t, t)`, not `score(v_t, t)`). `songunet` conditions on `X`/`V`/conditioning
-via channel-concatenation into the network's input, and on the timestep via `SongUNet`'s own native
+scoring (`score(x_t, v_t, t)`, not `score(v_t, t)`). `unet_model` conditions on `X`/`V`/conditioning
+via channel-concatenation into the network's input, and on the timestep via `UNetModel`'s own native
 `noise_labels` embedding pathway (unlike `fno`, which has no native time-conditioning mechanism and
-uses a broadcast time channel instead). `SongUNet`'s own EDM preconditioning wrappers
+uses a broadcast time channel instead). `UNetModel`'s own EDM preconditioning wrappers
 (`VPPrecond`/`VEPrecond`/`EDMPrecond`) are deliberately bypassed -- this repo already has its own
 SDE/preconditioning machinery (`synthetic/exact_dsm.py`); the raw network is called directly
-(`label_dim=0`, unconditional in `SongUNet`'s own terms) and its output is interpreted as a
+(`label_dim=0`, unconditional in `UNetModel`'s own terms) and its output is interpreted as a
 velocity-score prediction, exactly like `FNOScoreNetwork`'s output. The `attention` path /
 `MultiPhysicsScoreNetwork` is left exactly as-is (superseded for CSHO methods under `fno`/
-`songunet`, not patched in place) -- zero risk to already-produced `attention`-path results.
+`unet_model`, not patched in place) -- zero risk to already-produced `attention`-path results.
 
-**What changed, concretely, for `fno`/`songunet`:**
+**What changed, concretely, for `fno`/`unet_model`:**
 - `pde/model.py::SpatialFieldModel` replaces `PhysicsModel` for this path: `PhysicsBackbone` is
   reused unchanged, but `FieldHead`'s vector round-trip (`to_latent`/`readout_proj`/
   `readout_conv`/`readout_out`) is dropped entirely. A lightweight per-task CNN head (structurally
@@ -438,7 +440,7 @@ fixed default like every other caller (`synthetic/run_experiment.py`,
 
 **A real `fno` run against production data diverged catastrophically after this phase landed --
 see Section 12 for the root cause (a compounding score-network output-scale bias), the fix (a
-learnable per-task output gain on `FNOScoreNetwork`/`SongUNetScoreNetwork`), and the new
+learnable per-task output gain on `FNOScoreNetwork`/`UNetModelScoreNetwork`), and the new
 stability-test methodology (`tests/test_pde_reverse_sde_stability.py`) written to catch this class
 of bug before spending real GPU time again.**
 
@@ -511,7 +513,7 @@ caching philosophy as Section 10's held-out split — computed once, reused iden
 subsequent method/architecture/seed so the whole grid stays validly comparable; a key mismatch,
 e.g. a local smoke-test fixture, recomputes fresh in-memory without touching the persisted
 canonical file). The network's raw output (`y0`, `model.decode(...)`, and the spatial
-(`fno`/`songunet`) path's `X0`) is trained to predict **directly in normalized space** —
+(`fno`/`unet_model`) path's `X0`) is trained to predict **directly in normalized space** —
 `run_experiment.py::_normalize_targets` precomputes `(target - mean)/std` once per batch, and
 `init_loss`/`readout_loss` compare the network's raw output to that directly (plain `F.l1_loss`,
 no transform on the prediction side). `evaluate()` denormalizes (`_denormalize_preds`,
@@ -586,7 +588,7 @@ architecture cannot represent exactly, unlike `attention`'s compact, spatially-u
 64-dim latent target.
 
 **Fix: learnable per-task output gain.** `FNOScoreNetwork`/`FlatFNOScoreNetwork`/
-`SongUNetScoreNetwork`/`FlatSongUNetScoreNetwork` each now have `self.output_gain =
+`UNetModelScoreNetwork`/`FlatUNetModelScoreNetwork` each now have `self.output_gain =
 nn.Parameter(torch.ones(n_tasks))`, multiplied elementwise into the raw network output
 (`out * self.output_gain.view(1, -1, 1, 1)`) before it's returned. Initialized to `1.0`, so
 behavior at init is unchanged — this cannot make a currently-working configuration worse. Trained
@@ -607,10 +609,10 @@ documents this exact technique catching an identical class of bug, unbounded mul
 in an earlier, uncorrected reverse-SDE sign convention, in the original scalar CSHO design) and
 recalibrating at every step count rather than trusting a cached value from a different one
 (`synthetic/anderson_tikhonov_n_sweep.py`). None of this existed for `pde/`'s spatial (`fno`/
-`songunet`) reverse-sampling pathway before now.
+`unet_model`) reverse-sampling pathway before now.
 
 **`tests/test_pde_reverse_sde_stability.py`** ports this methodology to `pde/`, covering all 9
-`(score_arch, problem)` combinations (`{attention, fno, songunet} x {TE_heat, E_flow, VA}`) in one
+`(score_arch, problem)` combinations (`{attention, fno, unet_model} x {TE_heat, E_flow, VA}`) in one
 bundled script, each combination printing its own pass/fail line:
 1. **Zero-score round-trip** at the real production budget (`n_diff_steps=20, dt=0.5`): force
    `score_outputs` to zero and assert the final/initial state-norm ratio stays under
@@ -635,7 +637,7 @@ bundled script, each combination printing its own pass/fail line:
    locally that VA's 12 real/imag tasks pushed `max_rel_l2` to ~15 purely from being
    undertrained-in-one-epoch (no divergence involved), dropping to ~3.5 by epoch 10.
 
-Meant to run on a GPU box, not a laptop — real FNO/SongUNet forward passes at `n_diff_steps` up to
+Meant to run on a GPU box, not a laptop — real FNO/UNetModel forward passes at `n_diff_steps` up to
 20 are slow on CPU (it does not need the real Multiphysics-Bench dataset, only compute speed):
 
 ```
@@ -717,7 +719,7 @@ debug this incident. It ruled out every other hypothesis in order: the calibrate
 (`~0.0036`) was tiny, not large, so noise injection (`Σ=GGᵀ≈1.3e-5`) was numerically negligible
 -- the score's own contribution to each reverse step was too small to be the driver; `output_gain`
 converged to plausible values (`0.45`-`0.70`), not something degenerate; and, most tellingly,
-`--score-arch fno` and `--score-arch songunet` (two independently-trained, architecturally
+`--score-arch fno` and `--score-arch unet_model` (two independently-trained, architecturally
 unrelated networks) produced **nearly identical** `X_norm` trajectories step-for-step
 (`t=4`: `597/579/653` vs `599/573/657`; `t=1`: `1026/997/1033` vs `1034/989/1042`) -- ruling out
 anything specific to either network's learned weights or time-conditioning mechanism, and
