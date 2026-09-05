@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn.functional as F
 import yaml
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, RandomSampler
 from tqdm import tqdm
 
 from core.baselines import (
@@ -272,10 +272,15 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
     target_mean = [target_norm_stats[name]["mean"] for name in task_names]
     target_std = [target_norm_stats[name]["std"] for name in task_names]
 
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
-                               num_workers=args.num_workers, collate_fn=collate_fn, drop_last=True)
+    steps_per_epoch = len(train_ds) // args.batch_size
+    total_steps = args.n_epochs * steps_per_epoch
+    train_sampler = RandomSampler(train_ds, replacement=True, num_samples=total_steps * args.batch_size)
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, sampler=train_sampler,
+                               num_workers=args.num_workers, collate_fn=collate_fn, drop_last=True,
+                               persistent_workers=args.num_workers > 0)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
-                             num_workers=args.num_workers, collate_fn=collate_fn)
+                             num_workers=args.num_workers, collate_fn=collate_fn,
+                             persistent_workers=args.num_workers > 0)
 
     is_spatial = args.score_arch in ("fno", "unet_model")
     fno_modes = tuple(int(v) for v in args.fno_modes.split(","))
@@ -345,87 +350,85 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
 
     model.train()
     score_net.train()
-    total_steps = args.n_epochs * len(train_loader)
     pbar = tqdm(total=total_steps, desc=f"[{args.problem}/{args.method}/{args.score_arch}] seed={seed}")
-    for _epoch in range(args.n_epochs):
-        for batch in train_loader:
-            conditioning = batch["conditioning"].to(device)
-            if "elliptic_params" in batch:
-                batch["elliptic_params"] = batch["elliptic_params"].to(device)
-            targets = [t.to(device) for t in batch["tasks"]]
-            targets_norm = _normalize_targets(targets, target_mean, target_std)
-            model_conditioning = _model_input_conditioning(args, batch, conditioning)
-            X, K_self, K_global, feat, y0 = _encode_state(args, model, task_names, model_conditioning, is_spatial)
+    for step, batch in enumerate(train_loader):
+        conditioning = batch["conditioning"].to(device)
+        if "elliptic_params" in batch:
+            batch["elliptic_params"] = batch["elliptic_params"].to(device)
+        targets = [t.to(device) for t in batch["tasks"]]
+        targets_norm = _normalize_targets(targets, target_mean, target_std)
+        model_conditioning = _model_input_conditioning(args, batch, conditioning)
+        X, K_self, K_global, feat, y0 = _encode_state(args, model, task_names, model_conditioning, is_spatial)
 
-            init_loss = torch.zeros((), device=device)
-            for name, y0_t, target_n in zip(task_names, [y0[n] for n in task_names], targets_norm):
-                init_loss = init_loss + F.l1_loss(y0_t, target_n)
+        init_loss = torch.zeros((), device=device)
+        for name, y0_t, target_n in zip(task_names, [y0[n] for n in task_names], targets_norm):
+            init_loss = init_loss + F.l1_loss(y0_t, target_n)
 
-            t_idx = torch.randint(1, args.n_diff_steps + 1, (1,)).item()
+        t_idx = torch.randint(1, args.n_diff_steps + 1, (1,)).item()
 
-            if is_csho:
-                orig_shape = X[0][0].shape
-                X_flat = torch.cat([X[i][0].reshape(-1, 1) for i in range(N)], dim=-1)
-                Z0 = torch.cat([X_flat, torch.zeros_like(X_flat)], dim=-1)
-                Phi_t, Sigma_t = params[t_idx - 1]
-                Zt, score_target = sample_and_tikhonov_score_target(Z0, Phi_t, Sigma_t, N, args.lam)
-                X_t = [[Zt[:, i:i + 1].reshape(*orig_shape)] for i in range(N)]
-                V_t = [[Zt[:, N + i:N + i + 1].reshape(*orig_shape)] for i in range(N)]
+        if is_csho:
+            orig_shape = X[0][0].shape
+            X_flat = torch.cat([X[i][0].reshape(-1, 1) for i in range(N)], dim=-1)
+            Z0 = torch.cat([X_flat, torch.zeros_like(X_flat)], dim=-1)
+            Phi_t, Sigma_t = params[t_idx - 1]
+            Zt, score_target = sample_and_tikhonov_score_target(Z0, Phi_t, Sigma_t, N, args.lam)
+            X_t = [[Zt[:, i:i + 1].reshape(*orig_shape)] for i in range(N)]
+            V_t = [[Zt[:, N + i:N + i + 1].reshape(*orig_shape)] for i in range(N)]
 
-                score_fn, _ = _build_score_fns(args, score_net, feat)
-                score_pred = score_fn(X_t, V_t, t_idx)
-                tikhonov = torch.zeros((), device=device)
-                for i in range(N):
-                    target_i = score_target[:, i:i + 1].reshape(*orig_shape)
-                    tikhonov = tikhonov + F.mse_loss(score_pred[i][0], target_i)
+            score_fn, _ = _build_score_fns(args, score_net, feat)
+            score_pred = score_fn(X_t, V_t, t_idx)
+            tikhonov = torch.zeros((), device=device)
+            for i in range(N):
+                target_i = score_target[:, i:i + 1].reshape(*orig_shape)
+                tikhonov = tikhonov + F.mse_loss(score_pred[i][0], target_i)
 
-                if is_spatial:
-                    loss = init_loss + args.lambda_tikhonov * tikhonov
-                else:
-                    readout_loss = torch.zeros((), device=device)
-                    for name, x, target_n in zip(task_names, X, targets_norm):
-                        pred = model.decode(name, x[0])
-                        readout_loss = readout_loss + F.l1_loss(pred, target_n)
-                    loss = init_loss + readout_loss + args.lambda_tikhonov * tikhonov
+            if is_spatial:
+                loss = init_loss + args.lambda_tikhonov * tikhonov
             else:
-                X0_flat = [x[0] for x in X]
-                _, flat_fn = _build_score_fns(args, score_net, feat)
-                if args.method == "ddpm":
-                    ac, _, _ = state["ddpm_sched"]
-                    Xt, noise = ddpm_forward_n(X0_flat, torch.tensor(t_idx, device=device), ac)
-                    eps_pred = flat_fn(Xt, t_idx)
-                else:
-                    beta_t = vp_beta_t(torch.tensor(t_idx / args.n_diff_steps, device=device), 1.0)
-                    Xt, noise = vp_forward_step_with_noise(X0_flat, beta_t, 1.0 / args.n_diff_steps)
-                    eps_pred = flat_fn(Xt, t_idx / args.n_diff_steps)
-                diffusion_loss = sum(F.mse_loss(p, n) for p, n in zip(eps_pred, noise))
-
-                if is_spatial:
-                    loss = init_loss + args.lambda_tikhonov * diffusion_loss
-                else:
-                    readout_loss = torch.zeros((), device=device)
-                    for name, x, target_n in zip(task_names, X, targets_norm):
-                        pred = model.decode(name, x[0])
-                        readout_loss = readout_loss + F.l1_loss(pred, target_n)
-                    loss = init_loss + readout_loss + args.lambda_tikhonov * diffusion_loss
-
-            optimizer.zero_grad()
-            loss.backward()
-            buckets = {}
-            for prefix, mod in (("model", model), ("score_net", score_net)):
-                for k, v in grad_norm_buckets(mod).items():
-                    buckets[f"{prefix}.{k}"] = v
-            triggered, _ = drift_detector.update_and_check(buckets, args.explode_threshold)
-            if triggered:
-                explosion_events += 1
-            if torch.isfinite(loss):
-                optimizer.step()
+                readout_loss = torch.zeros((), device=device)
+                for name, x, target_n in zip(task_names, X, targets_norm):
+                    pred = model.decode(name, x[0])
+                    readout_loss = readout_loss + F.l1_loss(pred, target_n)
+                loss = init_loss + readout_loss + args.lambda_tikhonov * tikhonov
+        else:
+            X0_flat = [x[0] for x in X]
+            _, flat_fn = _build_score_fns(args, score_net, feat)
+            if args.method == "ddpm":
+                ac, _, _ = state["ddpm_sched"]
+                Xt, noise = ddpm_forward_n(X0_flat, torch.tensor(t_idx, device=device), ac)
+                eps_pred = flat_fn(Xt, t_idx)
             else:
-                nan_events += 1
-            n_steps += 1
-            pbar.set_postfix(epoch=f"{_epoch + 1}/{args.n_epochs}", loss=f"{loss.item():.4f}",
-                              nan=nan_events, explosion=explosion_events)
-            pbar.update(1)
+                beta_t = vp_beta_t(torch.tensor(t_idx / args.n_diff_steps, device=device), 1.0)
+                Xt, noise = vp_forward_step_with_noise(X0_flat, beta_t, 1.0 / args.n_diff_steps)
+                eps_pred = flat_fn(Xt, t_idx / args.n_diff_steps)
+            diffusion_loss = sum(F.mse_loss(p, n) for p, n in zip(eps_pred, noise))
+
+            if is_spatial:
+                loss = init_loss + args.lambda_tikhonov * diffusion_loss
+            else:
+                readout_loss = torch.zeros((), device=device)
+                for name, x, target_n in zip(task_names, X, targets_norm):
+                    pred = model.decode(name, x[0])
+                    readout_loss = readout_loss + F.l1_loss(pred, target_n)
+                loss = init_loss + readout_loss + args.lambda_tikhonov * diffusion_loss
+
+        optimizer.zero_grad()
+        loss.backward()
+        buckets = {}
+        for prefix, mod in (("model", model), ("score_net", score_net)):
+            for k, v in grad_norm_buckets(mod).items():
+                buckets[f"{prefix}.{k}"] = v
+        triggered, _ = drift_detector.update_and_check(buckets, args.explode_threshold)
+        if triggered:
+            explosion_events += 1
+        if torch.isfinite(loss):
+            optimizer.step()
+        else:
+            nan_events += 1
+        n_steps += 1
+        pbar.set_postfix(epoch=f"{step // steps_per_epoch + 1}/{args.n_epochs}", loss=f"{loss.item():.4f}",
+                          nan=nan_events, explosion=explosion_events)
+        pbar.update(1)
     pbar.close()
 
     if args.debug_rollout and hasattr(score_net, "output_gain"):
