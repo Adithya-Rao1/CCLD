@@ -13,7 +13,7 @@ from core.sde import build_g_matrix_n
 from core.stats import aggregate_over_seeds, compare_configs
 from synthetic.anderson_sde import anderson_em_step_coupled_gamma, anderson_reverse_step_coupled_gamma
 from synthetic.drift_coupled_gamma import calibrate_coupled_gammas, calibrate_sigma_fdt_coupled
-from synthetic.exact_dsm import precompute_transition_params, sample_and_tikhonov_score_target
+from synthetic.exact_dsm import elapsed_time_at_step, precompute_transition_params, sample_and_analytic_score_target
 from synthetic.ground_truth_sde import GroundTruthCoupledOU, make_ground_truth
 from synthetic.run_experiment import CoupledScoreNet, _make_conditioning, evaluate_sampling_quality
 
@@ -23,7 +23,6 @@ def _constant_tau_time_scale(t, T) -> torch.Tensor:
 ALPHA_V = 1.0
 K_REFERENCE = 1.0
 TARGET_ZETA = 1.0
-LAM = 0.01
 N_DIFF_STEPS = 32
 DT = 1.0 / N_DIFF_STEPS
 BATCH_SIZE = 256
@@ -44,7 +43,7 @@ N_TRAIN_ITERS = 2000
 N_SAMPLES = 4000
 SEEDS = [0, 1, 2, 3, 4]
 N_SWEEP = [2, 3, 4, 5]
-OUT_DIR = "results/experiment_3_synthetic/anderson_tikhonov_n_sweep"
+OUT_DIR = "results/experiment_3_synthetic/anderson_analytic_n_sweep"
 BASELINE_DIR = "results/experiment_3_synthetic/exact_prior_std_sweep"
 
 
@@ -73,7 +72,7 @@ def _estimate_prior_std_anderson(N: int, gt: GroundTruthCoupledOU, coupling, gam
     return prior_std_x, prior_std_v
 
 
-def train_csho_tikhonov(N: int, sigma_ab: Tuple[float, float], gt: GroundTruthCoupledOU, device):
+def train_csho_analytic(N: int, sigma_ab: Tuple[float, float], gt: GroundTruthCoupledOU, device):
     coupling = build_coupling_matrix(N, mode="mean_field", device=device)
     gamma_self, gamma_couple = calibrate_coupled_gammas(ALPHA_V, BETA, K_REFERENCE, K_REFERENCE, N, target_zeta=TARGET_ZETA)
     g_fn = _g_fn(N, sigma_ab, coupling, device)
@@ -90,9 +89,10 @@ def train_csho_tikhonov(N: int, sigma_ab: Tuple[float, float], gt: GroundTruthCo
         X0 = gt.sample_stationary(BATCH_SIZE).to(device)
         Z0 = torch.cat([X0, torch.zeros_like(X0)], dim=1)
         t_idx = torch.randint(1, N_DIFF_STEPS + 1, (1,)).item()
-        Phi_t, Sigma_t = params[t_idx - 1]
+        Phi_t, _ = params[t_idx - 1]
+        q = elapsed_time_at_step(t_idx, N_DIFF_STEPS, DT, TIME_SCALE_FN)
 
-        Zt, score_v_target = sample_and_tikhonov_score_target(Z0, Phi_t, Sigma_t, N, LAM)
+        Zt, score_v_target = sample_and_analytic_score_target(Z0, Phi_t, N, gamma_self, gamma_couple, q)
         X_t = [[Zt[:, i : i + 1]] for i in range(N)]
         V_t = [[Zt[:, N + i : N + i + 1]] for i in range(N)]
 
@@ -131,7 +131,7 @@ def train_one_seed(N: int, seed: int) -> Dict[str, float]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     sigma_ab = _get_sigma_n(N)
     gt = make_ground_truth(N, COUPLING_STRENGTH, seed, 1.0, 1.0, device=device)
-    score_net, gamma_self, gamma_couple, coupling, prior_std = train_csho_tikhonov(N, sigma_ab, gt, device)
+    score_net, gamma_self, gamma_couple, coupling, prior_std = train_csho_analytic(N, sigma_ab, gt, device)
     generated = sample_csho_anderson(N, sigma_ab, score_net, gamma_self, gamma_couple, coupling, prior_std, device)
     return evaluate_sampling_quality(generated, gt)
 
@@ -158,19 +158,19 @@ def run():
                 per_seed_rows.append({"N": N, "method": method_name, "seed": seed, **m})
 
         _a, _b = _get_sigma_n(N)
-        print(f"\n=== N={N} (a={_a:.4f}, b={_b:.4f}, lam={LAM}, beta={BETA}, n_diff_steps={N_DIFF_STEPS}, dt={DT}) ===")
+        print(f"\n=== N={N} (a={_a:.4f}, b={_b:.4f}, score_target=analytic, beta={BETA}, n_diff_steps={N_DIFF_STEPS}, dt={DT}) ===")
         per_seed = {}
         for seed in SEEDS:
             m = train_one_seed(N, seed)
             per_seed[seed] = m
-            per_seed_rows.append({"N": N, "method": "csho_tikhonov", "seed": seed, **m})
+            per_seed_rows.append({"N": N, "method": "csho_analytic", "seed": seed, **m})
             print(f"  seed={seed}: kl={m['kl_divergence']:.4f} corr_gen={m['mean_pairwise_corr_gen']:.4f} corr_true={m['mean_pairwise_corr_true']:.4f}")
 
         csho_summary = aggregate_over_seeds(per_seed)
         for metric, stats in csho_summary.items():
-            all_rows.append({"N": N, "method": "csho_tikhonov", "metric": metric, **stats})
+            all_rows.append({"N": N, "method": "csho_analytic", "metric": metric, **stats})
 
-        for method_name, s in [("ddpm", ddpm), ("sdm", sdm), ("csho_tikhonov", csho_summary)]:
+        for method_name, s in [("ddpm", ddpm), ("sdm", sdm), ("csho_analytic", csho_summary)]:
             summary_rows.append({
                 "N": N, "method": method_name,
                 "kl_mean": s["kl_divergence"]["mean"], "kl_std": s["kl_divergence"]["std"],
@@ -183,36 +183,36 @@ def run():
         for baseline_name, baseline_per_seed in [("ddpm", ddpm_per_seed), ("sdm", sdm_per_seed)]:
             sig = compare_configs(baseline_per_seed, per_seed, metric_names=sig_metric_names)
             for metric, s in sig.items():
-                sig_rows.append({"N": N, "comparison": f"csho_tikhonov_vs_{baseline_name}", "metric": metric, **s})
+                sig_rows.append({"N": N, "comparison": f"csho_analytic_vs_{baseline_name}", "metric": metric, **s})
 
-    write_csv(per_seed_rows, os.path.join(OUT_DIR, "tikhonov_n_sweep_per_seed.csv"))
-    write_csv(sig_rows, os.path.join(OUT_DIR, "tikhonov_n_sweep_significance.csv"))
-    write_csv(all_rows, os.path.join(OUT_DIR, "tikhonov_n_sweep_full.csv"))
-    write_csv(summary_rows, os.path.join(OUT_DIR, "tikhonov_n_sweep_summary.csv"))
+    write_csv(per_seed_rows, os.path.join(OUT_DIR, "analytic_n_sweep_per_seed.csv"))
+    write_csv(sig_rows, os.path.join(OUT_DIR, "analytic_n_sweep_significance.csv"))
+    write_csv(all_rows, os.path.join(OUT_DIR, "analytic_n_sweep_full.csv"))
+    write_csv(summary_rows, os.path.join(OUT_DIR, "analytic_n_sweep_summary.csv"))
     write_json(
-        {"lam": LAM, "beta": BETA, "sigma_ab_by_n": {N: list(_get_sigma_n(N)) for N in N_SWEEP}, "n_sweep": N_SWEEP,
+        {"score_target": "analytic", "beta": BETA, "sigma_ab_by_n": {N: list(_get_sigma_n(N)) for N in N_SWEEP}, "n_sweep": N_SWEEP,
          "n_diff_steps": N_DIFF_STEPS, "dt": DT, "summary_rows": summary_rows},
-        os.path.join(OUT_DIR, "tikhonov_n_sweep_results.json"),
+        os.path.join(OUT_DIR, "analytic_n_sweep_results.json"),
     )
 
-    print(f"\n\n=== SUMMARY: N=2..5, DDPM vs SDM vs CSHO-Tikhonov (Anderson-corrected, lam={LAM}) ===")
+    print("\n\n=== SUMMARY: N=2..5, DDPM vs SDM vs CSHO-Analytic (Anderson-corrected, analytic score target) ===")
     print(f"{'N':>3} {'method':>16} {'KL':>10} {'corr_gen':>10} {'corr_true':>10} {'%true':>8}")
     for row in summary_rows:
         print(f"{row['N']:>3} {row['method']:>16} {row['kl_mean']:>10.4f} {row['corr_gen_mean']:>10.4f} {row['corr_true']:>10.4f} {row['corr_pct_of_true']:>8.1f}")
 
-    print(f"\nWrote results to {OUT_DIR}/ (per-seed table for Wilcoxon: tikhonov_n_sweep_per_seed.csv; significance: tikhonov_n_sweep_significance.csv)")
+    print(f"\nWrote results to {OUT_DIR}/ (per-seed table for Wilcoxon: analytic_n_sweep_per_seed.csv; significance: analytic_n_sweep_significance.csv)")
     return summary_rows
 
 
 def parse_args(argv=None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Tikhonov-DSM CSHO vs. DDPM/SDM, N=2..5")
+    p = argparse.ArgumentParser(description="Analytic-DSM CSHO vs. DDPM/SDM, N=2..5")
     p.add_argument("--seeds", default="0,1,2,3,4")
     p.add_argument("--n-train-iters", type=int, default=2000)
     p.add_argument("--n-samples", type=int, default=4000)
     p.add_argument("--n-sweep", default="2,3,4,5")
     p.add_argument("--n-diff-steps", type=int, default=32)
     p.add_argument("--dt", type=float, default=None)
-    p.add_argument("--out-dir", default="results/experiment_3_synthetic/anderson_tikhonov_n_sweep")
+    p.add_argument("--out-dir", default="results/experiment_3_synthetic/anderson_analytic_n_sweep")
     p.add_argument("--baseline-dir", default="results/experiment_3_synthetic/exact_prior_std_sweep")
     return p.parse_args(argv)
 

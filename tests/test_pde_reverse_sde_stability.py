@@ -15,7 +15,7 @@ from pde.run_experiment import _build_score_fns, _encode_state, build_method_sta
 from pde.unet_model_score_net import FlatUNetModelScoreNetwork, UNetModelScoreNetwork
 from synthetic.anderson_sde import anderson_reverse_step_coupled_gamma
 from synthetic.drift_coupled_gamma import calibrate_coupled_gammas, calibrate_sigma_fdt_coupled
-from synthetic.exact_dsm import precompute_transition_params, sample_and_tikhonov_score_target
+from synthetic.exact_dsm import elapsed_time_at_step, precompute_transition_params, sample_and_analytic_score_target
 
 SCORE_ARCHES = ["attention", "fno", "unet_model"]
 PROBLEMS = ["TE_heat", "E_flow", "VA"]
@@ -184,19 +184,20 @@ def _train_csho_briefly(score_arch: str, problem: str, n_diff_steps: int, dt: fl
         orig_shape = X[0][0].shape
         X_flat = torch.cat([X[i][0].reshape(-1, 1) for i in range(N)], dim=-1)
         Z0 = torch.cat([X_flat, torch.zeros_like(X_flat)], dim=-1)
-        Phi_t, Sigma_t = params[t_idx - 1]
-        Zt, score_target = sample_and_tikhonov_score_target(Z0, Phi_t, Sigma_t, N, args.lam)
+        Phi_t, _ = params[t_idx - 1]
+        q = elapsed_time_at_step(t_idx, n_diff_steps, dt, None)
+        Zt, score_target = sample_and_analytic_score_target(Z0, Phi_t, N, gamma_self, gamma_couple, q)
         X_t = [[Zt[:, i:i + 1].reshape(*orig_shape)] for i in range(N)]
         V_t = [[Zt[:, N + i:N + i + 1].reshape(*orig_shape)] for i in range(N)]
 
         score_fn, _ = _build_score_fns(args, score_net, feat)
         score_pred = score_fn(X_t, V_t, t_idx)
-        tikhonov = torch.zeros((), device=device)
+        dsm_loss = torch.zeros((), device=device)
         for i in range(N):
             target_i = score_target[:, i:i + 1].reshape(*orig_shape)
-            tikhonov = tikhonov + F.mse_loss(score_pred[i][0], target_i)
+            dsm_loss = dsm_loss + F.mse_loss(score_pred[i][0], target_i)
 
-        loss = init_loss + tikhonov
+        loss = init_loss + dsm_loss
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()

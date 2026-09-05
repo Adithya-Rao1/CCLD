@@ -5,8 +5,20 @@ from typing import List, Optional, Tuple
 
 import torch
 
+from core.coupling import build_coupling_matrix
 from core.drift import _time_scale
-from synthetic.drift_coupled_gamma import drift_fn_coupled_gamma
+from synthetic.drift_coupled_gamma import antisymmetric_mode_damping, calibrate_sigma_fdt, drift_fn_coupled_gamma
+
+
+def elapsed_time_at_step(t_idx: int, T: int, dt: float, time_scale_fn=None, scale_kinematics_with_time: bool = True) -> float:
+    if not scale_kinematics_with_time:
+        return t_idx * dt
+    q = 0.0
+    for t in range(1, t_idx + 1):
+        kin_scale = _time_scale(torch.as_tensor(float(t)), T, time_scale_fn)
+        q += float(kin_scale.item()) * dt
+    return q
+
 
 def _extract_Avx_Avv_coupled_gamma(
     N: int, gamma_self: float, gamma_couple: float, alpha: List[float], beta: List[float],
@@ -176,29 +188,140 @@ def precompute_transition_params(
     return params
 
 
-def sample_and_tikhonov_score_target(Z0: torch.Tensor, Phi_t: torch.Tensor, Sigma_t: torch.Tensor, N: int, lam: float, jitter: float = 1e-6):
+def _sxx_scalar(Omega: torch.Tensor, g: torch.Tensor, q: torch.Tensor, x_threshold: float = 0.5) -> torch.Tensor:
+    x = Omega * q
+    series = (g**2 * q**3 / 3 - Omega * g**2 * q**4 / 2 + 2 * Omega**2 * g**2 * q**5 / 5
+              - 2 * Omega**3 * g**2 * q**6 / 9 + 2 * Omega**4 * g**2 * q**7 / 21 - Omega**5 * g**2 * q**8 / 30)
+    e2x = torch.exp(2 * x)
+    direct = (g**2 / (4 * Omega**3)) * (e2x - 1 - 2 * x - 2 * x**2) * torch.exp(-2 * x)
+    return torch.where(x < x_threshold, series, direct)
+
+
+def _sxv_scalar(Omega: torch.Tensor, g: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
+    return (g**2 * q**2 / 2) * torch.exp(-2 * Omega * q)
+
+
+def _svv_scalar(Omega: torch.Tensor, g: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
+    x = Omega * q
+    e2x = torch.exp(2 * x)
+    return (g**2 / (4 * Omega)) * (-2 * x**2 + 2 * x + e2x - 1) * torch.exp(-2 * x)
+
+
+def _var_v_given_x_scalar(Omega: torch.Tensor, g: torch.Tensor, q: torch.Tensor, x_threshold: float = 0.5) -> torch.Tensor:
+    Sxx = _sxx_scalar(Omega, g, q, x_threshold)
+    Sxv = _sxv_scalar(Omega, g, q)
+    Svv = _svv_scalar(Omega, g, q)
+    return Svv - Sxv**2 / Sxx.clamp_min(1e-30)
+
+
+def _regression_coeff_scalar(Omega: torch.Tensor, g: torch.Tensor, q: torch.Tensor, x_threshold: float = 0.5) -> torch.Tensor:
+    Sxx = _sxx_scalar(Omega, g, q, x_threshold)
+    Sxv = _sxv_scalar(Omega, g, q)
+    return Sxv / Sxx.clamp_min(1e-30)
+
+
+def _reconstruct_from_modes(val_sym: torch.Tensor, val_anti: torch.Tensor, N: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    d = (N - 1) / N * (val_sym - val_anti)
+    c = val_sym - d
+    return c, d
+
+
+def _mode_quantities(N: int, gamma_self: float, gamma_couple: float, q: torch.Tensor, target_variance: float, device, dtype):
+    q = torch.as_tensor(q, dtype=dtype, device=device)
+    Omega_sym = torch.as_tensor(gamma_self / 2.0, dtype=dtype, device=device)
+    g_sym = torch.as_tensor(calibrate_sigma_fdt(gamma_self, target_variance), dtype=dtype, device=device)
+    if N == 1:
+        return q, (Omega_sym, g_sym), None
+    gamma_anti = antisymmetric_mode_damping(gamma_self, gamma_couple, N)
+    Omega_anti = torch.as_tensor(gamma_anti / 2.0, dtype=dtype, device=device)
+    g_anti = torch.as_tensor(calibrate_sigma_fdt(gamma_anti, target_variance), dtype=dtype, device=device)
+    return q, (Omega_sym, g_sym), (Omega_anti, g_anti)
+
+
+def analytic_score_precision_n(
+    N: int, gamma_self: float, gamma_couple: float, q: torch.Tensor, target_variance: float = 1.0,
+    x_threshold: float = 0.5, device=None, dtype=torch.float32,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    q, (Omega_sym, g_sym), anti = _mode_quantities(N, gamma_self, gamma_couple, q, target_variance, device, dtype)
+    var_sym = _var_v_given_x_scalar(Omega_sym, g_sym, q, x_threshold)
+    coeff_sym = _regression_coeff_scalar(Omega_sym, g_sym, q, x_threshold)
+
+    if anti is None:
+        precision = (1.0 / var_sym.clamp_min(1e-30)).reshape(1, 1)
+        coeff = coeff_sym.reshape(1, 1)
+        return precision, coeff
+
+    Omega_anti, g_anti = anti
+    var_anti = _var_v_given_x_scalar(Omega_anti, g_anti, q, x_threshold)
+    coeff_anti = _regression_coeff_scalar(Omega_anti, g_anti, q, x_threshold)
+
+    prec_sym, prec_anti = 1.0 / var_sym.clamp_min(1e-30), 1.0 / var_anti.clamp_min(1e-30)
+    c_prec, d_prec = _reconstruct_from_modes(prec_sym, prec_anti, N)
+    c_coeff, d_coeff = _reconstruct_from_modes(coeff_sym, coeff_anti, N)
+
+    I = torch.eye(N, dtype=dtype, device=device)
+    C = build_coupling_matrix(N, mode="mean_field", device=device, dtype=dtype)
+    precision = c_prec * I + d_prec * C
+    coeff = c_coeff * I + d_coeff * C
+    return precision, coeff
+
+
+def analytic_conditional_covariance_n(
+    N: int, gamma_self: float, gamma_couple: float, q: torch.Tensor, target_variance: float = 1.0,
+    x_threshold: float = 0.5, device=None, dtype=torch.float32,
+) -> torch.Tensor:
+    """Exact closed-form Sigma_t = Var(Z_t | Z_0) (2N x 2N, conditional on a fixed Z_0, i.e.
+    Sigma_0=0), replacing the discrete EM-composed Sigma_t from precompute_transition_params.
+    Sxx uses the same small-q-stable/direct-switch as analytic_score_precision_n; Sxv and Svv
+    are numerically clean in closed form everywhere (no cancellation), so are always evaluated
+    directly."""
+    q, (Omega_sym, g_sym), anti = _mode_quantities(N, gamma_self, gamma_couple, q, target_variance, device, dtype)
+    sxx_sym = _sxx_scalar(Omega_sym, g_sym, q, x_threshold)
+    sxv_sym = _sxv_scalar(Omega_sym, g_sym, q)
+    svv_sym = _svv_scalar(Omega_sym, g_sym, q)
+
+    I = torch.eye(N, dtype=dtype, device=device)
+    if anti is None:
+        Sxx, Sxv, Svv = sxx_sym.reshape(1, 1), sxv_sym.reshape(1, 1), svv_sym.reshape(1, 1)
+    else:
+        Omega_anti, g_anti = anti
+        sxx_anti = _sxx_scalar(Omega_anti, g_anti, q, x_threshold)
+        sxv_anti = _sxv_scalar(Omega_anti, g_anti, q)
+        svv_anti = _svv_scalar(Omega_anti, g_anti, q)
+        C = build_coupling_matrix(N, mode="mean_field", device=device, dtype=dtype)
+        c_xx, d_xx = _reconstruct_from_modes(sxx_sym, sxx_anti, N)
+        c_xv, d_xv = _reconstruct_from_modes(sxv_sym, sxv_anti, N)
+        c_vv, d_vv = _reconstruct_from_modes(svv_sym, svv_anti, N)
+        Sxx, Sxv, Svv = c_xx * I + d_xx * C, c_xv * I + d_xv * C, c_vv * I + d_vv * C
+
+    Sigma = torch.zeros(2 * N, 2 * N, dtype=dtype, device=device)
+    Sigma[:N, :N], Sigma[:N, N:], Sigma[N:, :N], Sigma[N:, N:] = Sxx, Sxv, Sxv.T, Svv
+    return Sigma
+
+
+def sample_and_analytic_score_target(
+    Z0: torch.Tensor, Phi_t: torch.Tensor, N: int,
+    gamma_self: float, gamma_couple: float, q: torch.Tensor, target_variance: float = 1.0, jitter: float = 1e-6,
+):
     B = Z0.shape[0]
     device = Z0.device
     mean = Z0 @ Phi_t.T
+    Sigma_t = analytic_conditional_covariance_n(N, gamma_self, gamma_couple, q, target_variance, device=device, dtype=Z0.dtype)
     scale = Sigma_t.diagonal().abs().max().clamp_min(1.0)
     Sigma_reg = Sigma_t + jitter * scale * torch.eye(2 * N, device=device)
     L = torch.linalg.cholesky(Sigma_reg)
     eps = torch.randn(B, 2 * N, device=device)
     Zt = mean + eps @ L.T
 
-    Sxx = Sigma_t[:N, :N]
-    Sxv = Sigma_t[:N, N:]
-    Svx = Sigma_t[N:, :N]
-    Svv = Sigma_t[N:, N:]
-    Sxx_inv = torch.linalg.inv(Sxx + jitter * scale * torch.eye(N, device=device))
-    Var_V_given_X = Svv - Svx @ Sxx_inv @ Sxv
+    reg_precision, regression_coeff = analytic_score_precision_n(
+        N, gamma_self, gamma_couple, q, target_variance, device=device, dtype=Sigma_t.dtype,
+    )
 
     diff_x = Zt[:, :N] - mean[:, :N]
     diff_v = Zt[:, N:] - mean[:, N:]
-    E_V_given_X_dev = diff_x @ (Sxx_inv @ Sxv).clone()
+    E_V_given_X_dev = diff_x @ regression_coeff.T
     resid = diff_v - E_V_given_X_dev
 
-    reg_precision = torch.linalg.inv(Var_V_given_X + lam * torch.eye(N, device=device))
     score_v_reg = -resid @ reg_precision.T
     return Zt, score_v_reg
 

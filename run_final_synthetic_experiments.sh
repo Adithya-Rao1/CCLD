@@ -39,11 +39,11 @@ for N in 2 3 4 5; do
   done
 done
 
-if [ -f "${CSHO_OUT_DIR}/tikhonov_n_sweep_summary.csv" ]; then
-  echo "--- CSHO-Tikhonov champion, N=2..5: already present at ${CSHO_OUT_DIR}, skipping ---"
+if [ -f "${CSHO_OUT_DIR}/analytic_n_sweep_summary.csv" ]; then
+  echo "--- CSHO-Analytic champion, N=2..5: already present at ${CSHO_OUT_DIR}, skipping ---"
 else
-  echo "--- CSHO-Tikhonov champion, N=2..5: training ---"
-  python -m synthetic.anderson_tikhonov_n_sweep \
+  echo "--- CSHO-Analytic champion, N=2..5: training ---"
+  python -m synthetic.anderson_analytic_n_sweep \
     --seeds "${SEEDS}" \
     --n-train-iters "${N_ITERS}" \
     --n-samples "${N_SAMPLES}" \
@@ -54,6 +54,6 @@ else
     --baseline-dir "${BASELINE_DIR}"
 fi
 
-echo "=== Done. Final comparison written to ${CSHO_OUT_DIR}/tikhonov_n_sweep_summary.csv ==="
-echo "=== Per-seed table (for Wilcoxon): ${CSHO_OUT_DIR}/tikhonov_n_sweep_per_seed.csv ==="
-echo "=== Significance table: ${CSHO_OUT_DIR}/tikhonov_n_sweep_significance.csv ==="
+echo "=== Done. Final comparison written to ${CSHO_OUT_DIR}/analytic_n_sweep_summary.csv ==="
+echo "=== Per-seed table (for Wilcoxon): ${CSHO_OUT_DIR}/analytic_n_sweep_per_seed.csv ==="
+echo "=== Significance table: ${CSHO_OUT_DIR}/analytic_n_sweep_significance.csv ==="

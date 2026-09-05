@@ -21,7 +21,7 @@ from core.sde import build_g_matrix_n
 from core.stats import aggregate_over_seeds
 from synthetic.anderson_sde import anderson_em_step_coupled_gamma, anderson_reverse_step_coupled_gamma
 from synthetic.drift_coupled_gamma import calibrate_coupled_gammas, calibrate_sigma_fdt, calibrate_sigma_fdt_coupled
-from synthetic.exact_dsm import precompute_transition_params, sample_and_tikhonov_score_target
+from synthetic.exact_dsm import elapsed_time_at_step, precompute_transition_params, sample_and_analytic_score_target
 from pde.dataset import ALL_PROBLEMS, MultiPhysicsFieldDataset, collate_fn, _get_or_create_target_norm_stats
 from pde.pde_residuals import e_flow_residual, pde_residual_metric, te_heat_normalize_mater, te_heat_residual, va_residual
 
@@ -90,7 +90,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--target-zeta", type=float, default=None)
     p.add_argument("--alpha", default="1.0")
     p.add_argument("--beta", default="0.5")
-    p.add_argument("--lam", type=float, default=0.01, help="Tikhonov regularization strength for the DSM score target")
     p.add_argument("--k-reference", type=float, default=1.0,)
     p.add_argument("--constant-k", action="store_true")
     p.add_argument("--n-diff-steps", type=int, default=32)
@@ -118,7 +117,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--unet-channel-mult", default="1,2,2")
     p.add_argument("--unet-num-blocks", type=int, default=2)
     p.add_argument("--unet-attn-resolutions", default="16")
-    p.add_argument("--lambda-tikhonov", type=float, default=1.0)
+    p.add_argument("--lambda-dsm", type=float, default=1.0)
     p.add_argument("--explode-threshold", type=float, default=1e3)
     p.add_argument("--max-hook-modules", type=int, default=200)
     p.add_argument("--max-samples", type=int, default=None)
@@ -370,26 +369,27 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
             orig_shape = X[0][0].shape
             X_flat = torch.cat([X[i][0].reshape(-1, 1) for i in range(N)], dim=-1)
             Z0 = torch.cat([X_flat, torch.zeros_like(X_flat)], dim=-1)
-            Phi_t, Sigma_t = params[t_idx - 1]
-            Zt, score_target = sample_and_tikhonov_score_target(Z0, Phi_t, Sigma_t, N, args.lam)
+            Phi_t, _ = params[t_idx - 1]
+            q = elapsed_time_at_step(t_idx, args.n_diff_steps, args.dt, None)
+            Zt, score_target = sample_and_analytic_score_target(Z0, Phi_t, N, gamma_self, gamma_couple, q)
             X_t = [[Zt[:, i:i + 1].reshape(*orig_shape)] for i in range(N)]
             V_t = [[Zt[:, N + i:N + i + 1].reshape(*orig_shape)] for i in range(N)]
 
             score_fn, _ = _build_score_fns(args, score_net, feat)
             score_pred = score_fn(X_t, V_t, t_idx)
-            tikhonov = torch.zeros((), device=device)
+            dsm_loss = torch.zeros((), device=device)
             for i in range(N):
                 target_i = score_target[:, i:i + 1].reshape(*orig_shape)
-                tikhonov = tikhonov + F.mse_loss(score_pred[i][0], target_i)
+                dsm_loss = dsm_loss + F.mse_loss(score_pred[i][0], target_i)
 
             if is_spatial:
-                loss = init_loss + args.lambda_tikhonov * tikhonov
+                loss = init_loss + args.lambda_dsm * dsm_loss
             else:
                 readout_loss = torch.zeros((), device=device)
                 for name, x, target_n in zip(task_names, X, targets_norm):
                     pred = model.decode(name, x[0])
                     readout_loss = readout_loss + F.l1_loss(pred, target_n)
-                loss = init_loss + readout_loss + args.lambda_tikhonov * tikhonov
+                loss = init_loss + readout_loss + args.lambda_dsm * dsm_loss
         else:
             X0_flat = [x[0] for x in X]
             _, flat_fn = _build_score_fns(args, score_net, feat)
@@ -404,13 +404,13 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
             diffusion_loss = sum(F.mse_loss(p, n) for p, n in zip(eps_pred, noise))
 
             if is_spatial:
-                loss = init_loss + args.lambda_tikhonov * diffusion_loss
+                loss = init_loss + args.lambda_dsm * diffusion_loss
             else:
                 readout_loss = torch.zeros((), device=device)
                 for name, x, target_n in zip(task_names, X, targets_norm):
                     pred = model.decode(name, x[0])
                     readout_loss = readout_loss + F.l1_loss(pred, target_n)
-                loss = init_loss + readout_loss + args.lambda_tikhonov * diffusion_loss
+                loss = init_loss + readout_loss + args.lambda_dsm * diffusion_loss
 
         optimizer.zero_grad()
         loss.backward()

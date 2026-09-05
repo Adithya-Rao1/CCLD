@@ -7,7 +7,7 @@ from typing import Dict, List, Tuple
 import torch
 from scipy.linalg import solve_continuous_lyapunov
 
-import synthetic.anderson_tikhonov_n_sweep as sweep
+import synthetic.anderson_analytic_n_sweep as sweep
 from core.coupling import build_coupling_matrix
 from synthetic.anderson_sde import anderson_em_step_coupled_gamma, anderson_reverse_step_coupled_gamma
 from synthetic.drift_coupled_gamma import calibrate_coupled_gammas, calibrate_sigma_fdt, calibrate_sigma_fdt_coupled
@@ -84,7 +84,7 @@ def test_A1_reproduce(device):
         for seed in SEEDS_SMOKE:
             torch.manual_seed(seed)
             gt = make_ground_truth(N, COUPLING_STRENGTH, seed, 1.0, 1.0, device=device)
-            score_net, gamma_self, gamma_couple, coupling, prior_std = sweep.train_csho_tikhonov(N, sigma_ab, gt, device)
+            score_net, gamma_self, gamma_couple, coupling, prior_std = sweep.train_csho_analytic(N, sigma_ab, gt, device)
             sweep.N_SAMPLES = N_SAMPLES_SMOKE
             generated = sweep.sample_csho_anderson(N, sigma_ab, score_net, gamma_self, gamma_couple, coupling, prior_std, device)
             m = evaluate_sampling_quality(generated, gt)
@@ -242,7 +242,7 @@ def test_B1_diagonal_diffusion(device):
         for seed in SEEDS_SMOKE:
             torch.manual_seed(seed)
             gt = make_ground_truth(N, COUPLING_STRENGTH, seed, 1.0, 1.0, device=device)
-            score_net, gs, gc, coupling, prior_std = sweep.train_csho_tikhonov(N, sigma_ab, gt, device)
+            score_net, gs, gc, coupling, prior_std = sweep.train_csho_analytic(N, sigma_ab, gt, device)
             sweep.N_SAMPLES = N_SAMPLES_SMOKE
             generated = sweep.sample_csho_anderson(N, sigma_ab, score_net, gs, gc, coupling, prior_std, device)
             m = evaluate_sampling_quality(generated, gt)
@@ -262,7 +262,7 @@ def test_B2_increased_elapsed_time(device):
             for seed in SEEDS_SMOKE:
                 torch.manual_seed(seed)
                 gt = make_ground_truth(N, COUPLING_STRENGTH, seed, 1.0, 1.0, device=device)
-                score_net, gs, gc, coupling, prior_std = sweep.train_csho_tikhonov(N, sigma_ab, gt, device)
+                score_net, gs, gc, coupling, prior_std = sweep.train_csho_analytic(N, sigma_ab, gt, device)
                 sweep.N_SAMPLES = N_SAMPLES_SMOKE
                 generated = sweep.sample_csho_anderson(N, sigma_ab, score_net, gs, gc, coupling, prior_std, device)
                 m = evaluate_sampling_quality(generated, gt)
@@ -284,7 +284,7 @@ def test_B3_combined(device):
             for seed in SEEDS_SMOKE:
                 torch.manual_seed(seed)
                 gt = make_ground_truth(N, COUPLING_STRENGTH, seed, 1.0, 1.0, device=device)
-                score_net, gs, gc, coupling, prior_std = sweep.train_csho_tikhonov(N, sigma_ab, gt, device)
+                score_net, gs, gc, coupling, prior_std = sweep.train_csho_analytic(N, sigma_ab, gt, device)
                 sweep.N_SAMPLES = N_SAMPLES_SMOKE
                 generated = sweep.sample_csho_anderson(N, sigma_ab, score_net, gs, gc, coupling, prior_std, device)
                 m = evaluate_sampling_quality(generated, gt)
@@ -303,7 +303,7 @@ def test_B4_free_dt_rescale(device):
         for seed in SEEDS_SMOKE:
             torch.manual_seed(seed)
             gt = make_ground_truth(N, COUPLING_STRENGTH, seed, 1.0, 1.0, device=device)
-            score_net, gs, gc, coupling, prior_std = sweep.train_csho_tikhonov(N, sigma_ab, gt, device)
+            score_net, gs, gc, coupling, prior_std = sweep.train_csho_analytic(N, sigma_ab, gt, device)
             sweep.N_SAMPLES = N_SAMPLES_SMOKE
             generated = sweep.sample_csho_anderson(N, sigma_ab, score_net, gs, gc, coupling, prior_std, device)
             m = evaluate_sampling_quality(generated, gt)
@@ -323,7 +323,7 @@ def test_C1_constant_tau(device):
             for seed in SEEDS_SMOKE:
                 torch.manual_seed(seed)
                 gt = make_ground_truth(N, COUPLING_STRENGTH, seed, 1.0, 1.0, device=device)
-                score_net, gs, gc, coupling, prior_std = sweep.train_csho_tikhonov(N, sigma_ab, gt, device)
+                score_net, gs, gc, coupling, prior_std = sweep.train_csho_analytic(N, sigma_ab, gt, device)
                 sweep.N_SAMPLES = N_SAMPLES_SMOKE
                 generated = sweep.sample_csho_anderson(N, sigma_ab, score_net, gs, gc, coupling, prior_std, device)
                 m = evaluate_sampling_quality(generated, gt)
@@ -347,7 +347,7 @@ def test_C2_full_scale_verification(device, tau_values=(1.5, 2.0)):
             for seed in seeds_full:
                 torch.manual_seed(seed)
                 gt = make_ground_truth(N, COUPLING_STRENGTH, seed, 1.0, 1.0, device=device)
-                score_net, gs, gc, coupling, prior_std = sweep.train_csho_tikhonov(N, sigma_ab, gt, device)
+                score_net, gs, gc, coupling, prior_std = sweep.train_csho_analytic(N, sigma_ab, gt, device)
                 sweep.N_SAMPLES = n_samples_full
                 generated = sweep.sample_csho_anderson(N, sigma_ab, score_net, gs, gc, coupling, prior_std, device)
                 m = evaluate_sampling_quality(generated, gt)
@@ -371,7 +371,7 @@ def test_D1_kl_decomposition(device, tau=2.0):
         for seed in SEEDS_SMOKE:
             torch.manual_seed(seed)
             gt = make_ground_truth(N, COUPLING_STRENGTH, seed, 1.0, 1.0, device=device)
-            score_net, gs, gc, coupling, prior_std = sweep.train_csho_tikhonov(N, sigma_ab, gt, device)
+            score_net, gs, gc, coupling, prior_std = sweep.train_csho_analytic(N, sigma_ab, gt, device)
             sweep.N_SAMPLES = N_SAMPLES_SMOKE
             generated = sweep.sample_csho_anderson(N, sigma_ab, score_net, gs, gc, coupling, prior_std, device)
 
@@ -411,7 +411,7 @@ def test_D1_kl_decomposition(device, tau=2.0):
 
 def test_D2_score_error_vs_t(device, tau=2.0, n_sweep=None):
     print(f"\n=== D2: trained score error vs. exact marginal score, as a function of diffusion step (tau={tau}) ===")
-    print("    (tests whether error concentrates near t_idx->0, i.e. Tikhonov under-strength near the singularity)")
+    print("    (tests whether error concentrates near t_idx->0, i.e. the score singularity)")
     dt_fixed = 1.0 / N_DIFF_STEPS_BASE
     _setup_sweep_module(device, N_DIFF_STEPS_BASE, dt_fixed, N_TRAIN_ITERS_SMOKE, time_scale_fn=_constant_time_scale(tau))
     for N in (n_sweep if n_sweep is not None else N_SWEEP):
@@ -427,7 +427,7 @@ def test_D2_score_error_vs_t(device, tau=2.0, n_sweep=None):
         Sigma_gt = gt.stationary_covariance()
 
         torch.manual_seed(0)
-        score_net, gs, gc, coupling_trained, prior_std = sweep.train_csho_tikhonov(N, sigma_ab, gt, device)
+        score_net, gs, gc, coupling_trained, prior_std = sweep.train_csho_analytic(N, sigma_ab, gt, device)
 
         B = 1024
         rows = []
@@ -545,7 +545,7 @@ def _train_csho_custom_lam(N, sigma_ab, gt, device, lam_fn, n_train_iters):
 
 
 def test_E1_lam_sweep(device, tau=2.0):
-    print(f"\n=== E1: Tikhonov regularization scheme sweep (constant tau={tau}) ===")
+    print(f"\n=== E1: [OBSOLETE -- lam parameter no longer exists, see note] regularization scheme sweep (constant tau={tau}) ===")
     dt_fixed = 1.0 / N_DIFF_STEPS_BASE
     _setup_sweep_module(device, N_DIFF_STEPS_BASE, dt_fixed, N_TRAIN_ITERS_SMOKE, time_scale_fn=_constant_time_scale(tau))
     for scheme_name, lam_fn in LAM_SCHEMES.items():

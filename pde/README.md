@@ -148,8 +148,11 @@ plays in `synthetic/`. Concretely: mode-decoupled critical damping
 (`synthetic.drift_coupled_gamma.calibrate_coupled_gammas`, symmetric/antisymmetric
 `gamma_self`/`gamma_couple`), the Anderson-corrected reverse SDE
 (`synthetic.anderson_sde.anderson_em_step_coupled_gamma`/`anderson_reverse_step_coupled_gamma`),
-Tikhonov-regularized DSM (`synthetic.exact_dsm.sample_and_tikhonov_score_target`, `--lam`) in
-place of the old `ndsm_loss_n`, and exact matrix-recursion noise calibration
+DSM score-target computation (`synthetic.exact_dsm.sample_and_analytic_score_target`) in place of
+the old `ndsm_loss_n` -- now computed via `analytic_score_precision_n`'s exact, closed-form
+per-mode solution (stable for every elapsed time `q` including `q->0`), not a fixed Tikhonov
+regularization constant (`--lam` removed; see the "Var(V|X) ill-conditioning" derivation in
+session notes for why the analytic replacement was needed), and exact matrix-recursion noise calibration
 (`synthetic.exact_dsm.calibrate_sigma_for_leak`, `--leak-fraction`) in place of the old flat
 `--sigma`.
 
@@ -406,7 +409,7 @@ velocity-score prediction, exactly like `FNOScoreNetwork`'s output. The `attenti
   identical to `FieldHead`'s `y0_head`) produces the deterministic initial state `X0` directly in
   native `(B,1,H,W)` field space -- the only source of the diffused state, no pooling anywhere.
   `decode` is the identity; the reverse SDE's final state *is* the prediction.
-- Training loss is `init_loss + lambda_tikhonov * tikhonov` (CSHO) -- `readout_loss` is dropped
+- Training loss is `init_loss + lambda_dsm * dsm_loss` (CSHO) -- `readout_loss` is dropped
   since it would be literally redundant with `init_loss` now that decode is the identity (both
   would compare the same tensor to target).
 - `synthetic/`'s SDE machinery (`anderson_sde.py`, `exact_dsm.py`, `drift_coupled_gamma.py`)
@@ -414,13 +417,13 @@ velocity-score prediction, exactly like `FNOScoreNetwork`'s output. The `attenti
   nesting and `(N,N)`/`(2N,2N)` matrices (`N` = task count), never in the per-task payload tensor's
   shape; every payload-tensor op is elementwise or `.shape`-derived. The existing
   flatten-into-rows trick (`X[i][0].reshape(-1,1)` -> cat over tasks -> `sample_and_
-  tikhonov_score_target` -> reshape back) generalizes unchanged from `(B,latent_dim)` to
+  analytic_score_target` -> reshape back) generalizes unchanged from `(B,latent_dim)` to
   `(B,1,H,W)`; only the *restore* reshape needed to capture `orig_shape = X[0][0].shape` generically
   instead of hardcoding `(B, latent_dim)` (this generalization also applies to the `attention` path
   now, behavior-identical there since `orig_shape` reduces to `(B, latent_dim)`).
 
 **Discovered along the way, fixed in the shared `synthetic/exact_dsm.py`:
-`sample_and_tikhonov_score_target`'s default `jitter` was an absolute floor (`1e-8`), not scaled to
+`sample_and_analytic_score_target`'s default `jitter` was an absolute floor (`1e-8`), not scaled to
 `Sigma_t`'s magnitude.** `Sigma_t` at low `t_idx` (few noise-injection steps accumulated so far) is
 *mathematically* rank-deficient -- only `N` of `2N` noise dimensions have been injected yet -- so
 its smallest eigenvalues sit at floating-point-roundoff level and can go slightly negative once the
@@ -428,14 +431,14 @@ calibrated `sigma` scales up, making `torch.linalg.cholesky` fail intermittently
 **path-independent** (affects `attention` and `fno` equally -- reproduced by sweeping `sigma`
 values directly through `precompute_transition_params`, no encoder involved), was only surfaced by
 this phase's new smoke tests, and independently confirmed for real on `synthetic/`'s own N-sweep
-(`synthetic/anderson_tikhonov_n_sweep.py`), which hit the identical `linalg.cholesky` failure at
-N=5 on the user's A100. `jitter` (`synthetic/exact_dsm.py::sample_and_tikhonov_score_target`,
+(`synthetic/anderson_analytic_n_sweep.py`), which hit the identical `linalg.cholesky` failure at
+N=5 on the user's A100. `jitter` (`synthetic/exact_dsm.py::sample_and_analytic_score_target`,
 default now `1e-6`) is interpreted as **relative** to `Sigma_t.diagonal().abs().max()` rather than
 a bare additive constant, so it stays negligible for well-conditioned `Sigma_t` but reliably
 regularizes the rank-deficient case regardless of how large `sigma` is calibrated to.
 `pde/run_experiment.py`'s call site no longer needs (or has) a local override -- it inherits the
 fixed default like every other caller (`synthetic/run_experiment.py`,
-`synthetic/anderson_tikhonov_n_sweep.py`). Verified robust across 10 random seeds locally
+`synthetic/anderson_analytic_n_sweep.py`). Verified robust across 10 random seeds locally
 (previously reproducible within a handful).
 
 **A real `fno` run against production data diverged catastrophically after this phase landed --
@@ -581,8 +584,8 @@ tokens and its co-trained encoder/decoder can jointly compensate for whatever sc
 settles at, while `SpatialFieldModel`'s `X0` is rigidly pinned to z-scored physical units (Section
 11) with zero decode-side freedom, so any score-network gain bias shows up in the reported metric
 completely undiluted. Secondary/contributing candidate: `n_modes=(12,12)` (the FNO's spectral
-truncation) is a strong low-pass architectural bias, while the DSM/Tikhonov score target
-(`sample_and_tikhonov_score_target`) is built with noise drawn i.i.d. **per pixel** — a target
+truncation) is a strong low-pass architectural bias, while the DSM score target
+(`sample_and_analytic_score_target`) is built with noise drawn i.i.d. **per pixel** — a target
 containing substantial per-pixel-independent (high-frequency) content a 12x12-mode spectral
 architecture cannot represent exactly, unlike `attention`'s compact, spatially-unstructured
 64-dim latent target.
@@ -592,7 +595,7 @@ architecture cannot represent exactly, unlike `attention`'s compact, spatially-u
 nn.Parameter(torch.ones(n_tasks))`, multiplied elementwise into the raw network output
 (`out * self.output_gain.view(1, -1, 1, 1)`) before it's returned. Initialized to `1.0`, so
 behavior at init is unchanged — this cannot make a currently-working configuration worse. Trained
-by ordinary backprop through the same Tikhonov/DSM loss already in place, letting the network
+by ordinary backprop through the same DSM loss already in place, letting the network
 self-correct a systematic scale bias via gradient descent, per-task (a single global scalar would
 be under-specified, since e.g. `T` was far less affected than `Ez` in the observed run).
 
@@ -608,7 +611,7 @@ reverse trajectory alone doesn't blow up; `writeup/csho_writeup.tex`'s own Verif
 documents this exact technique catching an identical class of bug, unbounded multiplicative growth
 in an earlier, uncorrected reverse-SDE sign convention, in the original scalar CSHO design) and
 recalibrating at every step count rather than trusting a cached value from a different one
-(`synthetic/anderson_tikhonov_n_sweep.py`). None of this existed for `pde/`'s spatial (`fno`/
+(`synthetic/anderson_analytic_n_sweep.py`). None of this existed for `pde/`'s spatial (`fno`/
 `unet_model`) reverse-sampling pathway before now.
 
 **`tests/test_pde_reverse_sde_stability.py`** ports this methodology to `pde/`, covering all 9
@@ -655,7 +658,7 @@ known to work in production) diverges on the *deterministic* drift alone (no sco
 `pde/run_experiment.py`'s real config, `n_diff_steps=20` with `--dt` defaulting to a fixed `0.5`
 independent of `n_diff_steps` (`dt*n_diff_steps=10`) — isolated with a direct sweep: stable
 (ratio≈0.19-0.87) at every tested `(dt, n_diff_steps)` pair with `dt*n_diff_steps` near `1.0`,
-diverging (ratio≈9-40x) as that product grows past it. `synthetic/anderson_tikhonov_n_sweep.py`
+diverging (ratio≈9-40x) as that product grows past it. `synthetic/anderson_analytic_n_sweep.py`
 already documents and enforces the correct convention (`--dt` defaults to `1/n_diff_steps`,
 holding `n_diff_steps*dt` fixed at `1.0` as `n_diff_steps` varies) — `pde/run_experiment.py`'s
 `--dt` (default `0.5`, independent of `n_diff_steps`) and `pde/ablations.py`'s own separate `--dt`
@@ -726,8 +729,9 @@ anything specific to either network's learned weights or time-conditioning mecha
 pointing at something architecture-independent (i.e. the deterministic integrator config)
 instead. `pde/config.yaml`'s `dt`/`sigma` keys are removed (letting `parse_args`'s own
 auto-derivation and dynamic calibration apply); `lambda_ndsm` was already a dead key (no matching
-`--lambda-ndsm` flag exists -- `--lambda-tikhonov`'s dest is `lambda_tikhonov`) and is harmless
-but was not cleaned up.
+`--lambda-ndsm` flag exists -- the actual flag's dest is `lambda_dsm`, renamed from
+`lambda_tikhonov` once the Tikhonov-regularized score target was replaced by the analytic one) and
+is harmless but was not cleaned up.
 
 ## Important notes
 

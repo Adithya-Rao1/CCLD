@@ -8,7 +8,7 @@ from core.reporting import write_csv
 
 
 def load_summary_rows(seeds: int, iters: int, steps: int) -> list[dict]:
-    path = f"results/experiment_3_synthetic/final_champion_seeds{seeds}_iters{iters}_steps{steps}/tikhonov_n_sweep_summary.csv"
+    path = f"results/experiment_3_synthetic/final_champion_seeds{seeds}_iters{iters}_steps{steps}/analytic_n_sweep_summary.csv"
     with open(path, newline="") as f:
         rows = list(csv.DictReader(f))
     for row in rows:
@@ -17,7 +17,7 @@ def load_summary_rows(seeds: int, iters: int, steps: int) -> list[dict]:
 
 
 def load_significance_rows(seeds: int, iters: int, steps: int) -> list[dict]:
-    path = f"results/experiment_3_synthetic/final_champion_seeds{seeds}_iters{iters}_steps{steps}/tikhonov_n_sweep_significance.csv"
+    path = f"results/experiment_3_synthetic/final_champion_seeds{seeds}_iters{iters}_steps{steps}/analytic_n_sweep_significance.csv"
     with open(path, newline="") as f:
         rows = list(csv.DictReader(f))
     for row in rows:

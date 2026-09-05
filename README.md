@@ -113,10 +113,10 @@ Defaults: `20 10000 40000` (i.e. `bash run_final_synthetic_experiments.sh` with 
 these) -- chosen for statistical rigor: paired Wilcoxon can reach p<0.001 instead of the p=0.0625
 floor at 5 seeds, and 40000 eval samples keeps the KL estimator's own noise well below the gap
 between methods. It trains DDPM and SDM baselines and the champion CSHO configuration
-(Anderson-corrected reverse SDE, mode-decoupled critical damping, Tikhonov-regularized DSM,
-per-N-calibrated noise) at N=2,3,4,5, all at the same seed/iteration/sample budget, and writes the
-final comparison table to
-`results/experiment_3_synthetic/final_champion_seeds<N>_iters<I>/tikhonov_n_sweep_summary.csv`.
+(Anderson-corrected reverse SDE, mode-decoupled critical damping, analytic closed-form DSM score
+target, per-N-calibrated noise) at N=2,3,4,5, all at the same seed/iteration/sample budget, and
+writes the final comparison table to
+`results/experiment_3_synthetic/final_champion_seeds<N>_iters<I>/analytic_n_sweep_summary.csv`.
 Safe to re-run or resume after an interruption -- it skips any baseline already generated. Uses
 CUDA automatically if available; expect several hours at the default budget on even a powerful GPU
 (e.g. an A100), since the score nets are small MLPs and the bottleneck is Python-loop overhead
