@@ -3,10 +3,10 @@ set -uo pipefail
 
 PDE_DATA_ROOT="${1:-/home/ubuntu/metis-v1-storage/CSHM-data/multiphysics}"
 PROBLEM="${2:-TE_heat}"
-ARCH="${3:-attention}"
+ARCH="${3:-unet_model}"
 N_EPOCHS="${4:-150}"
 N_DIFF_STEPS="${5:-32}"
-BATCH_SIZE="${6:-1024}"
+BATCH_SIZE="${6:-64}"
 LR="${7:-0.01}"
 SEEDS="${8:-0,1,2,3,4,5,6,7,8,9}"
 NUM_WORKERS="${9:-16}"

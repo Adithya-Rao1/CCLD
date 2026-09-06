@@ -116,6 +116,7 @@ class MultiPhysicsScoreNetwork(nn.Module):
             nn.Sequential(nn.Linear(latent_dim, latent_dim), nn.SiLU(), nn.Linear(latent_dim, latent_dim))
             for _ in range(n_tasks)
         ])
+        self.output_gain = nn.Parameter(torch.ones(n_tasks))
 
     def forward(self, global_cond: torch.Tensor, V_query: List[List[torch.Tensor]], t) -> List[List[torch.Tensor]]:
         B = V_query[0][0].shape[0]
@@ -130,7 +131,7 @@ class MultiPhysicsScoreNetwork(nn.Module):
 
         out = []
         for i in range(self.n_tasks):
-            out.append([self.out_heads[i](tokens[:, i, :])])
+            out.append([self.out_heads[i](tokens[:, i, :]) * self.output_gain[i]])
         return out
 
 
