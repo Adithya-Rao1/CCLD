@@ -22,9 +22,6 @@ mkdir -p "${OUT_DIR}"
 
 echo "=== ${PROBLEM}/${ARCH}: n-epochs=${N_EPOCHS} n-diff-steps=${N_DIFF_STEPS} batch-size=${BATCH_SIZE} lr=${LR} seeds=${SEEDS} csho-tau=${CSHO_TAU} ==="
 
-# Phase 1: one shared, frozen encoder per seed (init_loss/readout_loss only, no score net) --
-# csho/ddpm/sdm each train their own score net on top of it, isolating the reverse-dynamics
-# mechanism as the only thing that varies between methods.
 MISSING_ENCODER_SEEDS=""
 for SEED in ${SEEDS//,/ }; do
   if [ ! -f "${ENCODER_DIR}/seed${SEED}.pt" ]; then
@@ -50,8 +47,6 @@ else
   echo "--- shared encoders: already present for all seeds in ${ENCODER_DIR}, skipping ---"
 fi
 
-# Phase 2: csho/ddpm/sdm, each loading and freezing that seed's shared encoder, training only
-# its own score net (csho additionally uses the constant-tau schedule fix via --csho-tau).
 for METHOD in csho ddpm sdm; do
   RESULT_FILE="${OUT_DIR}/${METHOD}_results.json"
   if [ -f "${RESULT_FILE}" ]; then

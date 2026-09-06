@@ -11,7 +11,7 @@ from synthetic.metrics import gaussian_mutual_information_matrix
 class GroundTruthCoupledOU:
     def __init__(self, theta: torch.Tensor, sigma_gt: torch.Tensor):
         if theta.shape[0] != theta.shape[1] or sigma_gt.shape[0] != sigma_gt.shape[1] or theta.shape[0] != sigma_gt.shape[0]:
-            raise ValueError("theta and sigma_gt must both be square (N,N) with matching N")
+            raise ValueError
         self.theta = theta
         self.sigma_gt = sigma_gt
         self.N = theta.shape[0]
@@ -45,10 +45,8 @@ def make_ground_truth(
     device=None,
     dtype: torch.dtype = torch.float32,
 ) -> GroundTruthCoupledOU:
-    if N < 2:
-        raise ValueError(f"make_ground_truth requires N >= 2, got N={N}")
-    if not (0.0 <= coupling_strength < 1.0):
-        raise ValueError(f"coupling_strength must be in [0, 1) for a guaranteed-stable theta, got {coupling_strength}")
+    if N < 2 or (0.0 <= coupling_strength < 1.0):
+        raise ValueError
 
     g = torch.Generator().manual_seed(seed)
     w = torch.rand((N, N), generator=g, dtype=dtype)

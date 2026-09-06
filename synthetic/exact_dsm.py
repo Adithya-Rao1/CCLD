@@ -270,11 +270,6 @@ def analytic_conditional_covariance_n(
     N: int, gamma_self: float, gamma_couple: float, q: torch.Tensor, target_variance: float = 1.0,
     x_threshold: float = 0.5, device=None, dtype=torch.float32,
 ) -> torch.Tensor:
-    """Exact closed-form Sigma_t = Var(Z_t | Z_0) (2N x 2N, conditional on a fixed Z_0, i.e.
-    Sigma_0=0), replacing the discrete EM-composed Sigma_t from precompute_transition_params.
-    Sxx uses the same small-q-stable/direct-switch as analytic_score_precision_n; Sxv and Svv
-    are numerically clean in closed form everywhere (no cancellation), so are always evaluated
-    directly."""
     q, (Omega_sym, g_sym), anti = _mode_quantities(N, gamma_self, gamma_couple, q, target_variance, device, dtype)
     sxx_sym = _sxx_scalar(Omega_sym, g_sym, q, x_threshold)
     sxv_sym = _sxv_scalar(Omega_sym, g_sym, q)

@@ -266,10 +266,6 @@ def _calibrate_csho_sigma(model, train_loader, N: int, gamma_self: float, gamma_
 
 
 def train_encoder_only(args: argparse.Namespace, seed: int) -> None:
-    """Train just the encoder (init_loss / readout_loss, no score net, no diffusion) and save a
-    checkpoint. Used to produce one shared, frozen encoder per seed that csho/ddpm/sdm each train
-    their own score net on top of (via --frozen-encoder-dir), isolating the reverse-dynamics
-    mechanism as the only thing that varies between methods."""
     torch.manual_seed(seed)
     device = torch.device(args.device)
 
@@ -464,8 +460,9 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
         t_idx = torch.randint(1, args.n_diff_steps + 1, (1,)).item()
 
         if is_csho:
-            orig_shape = X[0][0].shape
-            X_flat = torch.cat([X[i][0].reshape(-1, 1) for i in range(N)], dim=-1)
+            diffuse_state = targets_norm if is_spatial else [x[0] for x in X]
+            orig_shape = diffuse_state[0].shape
+            X_flat = torch.cat([diffuse_state[i].reshape(-1, 1) for i in range(N)], dim=-1)
             Z0 = torch.cat([X_flat, torch.zeros_like(X_flat)], dim=-1)
             Phi_t, _ = params[t_idx - 1]
             q = elapsed_time_at_step(t_idx, args.n_diff_steps, args.dt, _csho_time_scale_fn(args))
@@ -489,7 +486,7 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
                     readout_loss = readout_loss + F.l1_loss(pred, target_n)
                 loss = init_loss + readout_loss + args.lambda_dsm * dsm_loss
         else:
-            X0_flat = [x[0] for x in X]
+            X0_flat = targets_norm if is_spatial else [x[0] for x in X]
             _, flat_fn = _build_score_fns(args, score_net, feat)
             if args.method == "ddpm":
                 ac, _, _ = state["ddpm_sched"]
@@ -564,8 +561,9 @@ def evaluate(args, model, score_net, val_loader, device, task_names, state, gamm
 
         if is_csho:
             coupling, G = state["coupling"], state["g_matrix"]
-            V = [[torch.zeros_like(x[0])] for x in X]
-            X_cur, V_cur = X, V
+            X_init = [[torch.randn_like(x[0])] for x in X] if is_spatial else X
+            V = [[torch.zeros_like(x[0])] for x in X_init]
+            X_cur, V_cur = X_init, V
             score_fn, _ = _build_score_fns(args, score_net, feat)
             debug_this_batch = args.debug_rollout and first_batch
             for t_idx in reversed(range(1, args.n_diff_steps + 1)):
@@ -584,8 +582,11 @@ def evaluate(args, model, score_net, val_loader, device, task_names, state, gamm
         elif args.method == "ddpm":
             ac, betas_s, alphas_s = state["ddpm_sched"]
             T_eff = max(args.n_diff_steps - 1, 1)
-            X0_flat = [x[0] for x in X]
-            X_flat, _ = ddpm_forward_n(X0_flat, torch.tensor(T_eff, device=device), ac)
+            if is_spatial:
+                X_flat = [torch.randn_like(x[0]) for x in X]
+            else:
+                X0_flat = [x[0] for x in X]
+                X_flat, _ = ddpm_forward_n(X0_flat, torch.tensor(T_eff, device=device), ac)
             _, flat_fn = _build_score_fns(args, score_net, feat)
             for t_idx in reversed(range(1, T_eff)):
                 eps_pred = flat_fn(X_flat, t_idx)
@@ -594,10 +595,13 @@ def evaluate(args, model, score_net, val_loader, device, task_names, state, gamm
             ac1 = ac[1]
             final_latents = [(x - torch.sqrt(1 - ac1) * e) / torch.sqrt(ac1) for x, e in zip(X_flat, eps_pred)]
         else:
-            X0_flat = [x[0] for x in X]
+            if is_spatial:
+                X_flat = [torch.randn_like(x[0]) for x in X]
+            else:
+                X0_flat = [x[0] for x in X]
+                X_flat, _ = vp_sde_forward_marginal_n(X0_flat, torch.tensor(1.0, device=device))
             _, flat_fn = _build_score_fns(args, score_net, feat)
             dt_step = 1.0 / args.n_diff_steps
-            X_flat, _ = vp_sde_forward_marginal_n(X0_flat, torch.tensor(1.0, device=device))
             for t_idx in reversed(range(1, args.n_diff_steps + 1)):
                 t_cont = t_idx / args.n_diff_steps
                 beta_t = vp_beta_t(torch.tensor(t_cont, device=device), 1.0)
