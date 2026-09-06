@@ -128,6 +128,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="print trained score_net.output_gain (if present) and the CSHO reverse "
                          "rollout's per-step state norm for the first eval batch -- diagnostic "
                          "for isolating where a reverse-SDE divergence originates")
+    p.add_argument("--encoder-only", action="store_true",
+                    help="train only the encoder (init_loss/readout_loss) per seed in --seeds, save a "
+                         "checkpoint per seed to --save-encoder-dir, and exit -- no score net, no eval. "
+                         "Used to produce one shared, frozen encoder per seed that csho/ddpm/sdm all "
+                         "train their own score net on top of via --frozen-encoder-dir.")
+    p.add_argument("--save-encoder-dir", default=None,
+                    help="output directory for --encoder-only checkpoints (one seed{N}.pt per seed)")
+    p.add_argument("--frozen-encoder-dir", default=None,
+                    help="directory of per-seed encoder checkpoints (from --encoder-only) to load and "
+                         "freeze instead of training the encoder jointly with the score net")
+    p.add_argument("--csho-tau", type=float, default=None,
+                    help="if set, CSHO's elapsed dynamical time schedule is held at this constant value "
+                         "(time_scale_fn) instead of the default (T-t)/(t+T) schedule -- see pde/README.md "
+                         "on the corruption-severity confound between CSHO and DDPM/SDM this addresses")
     return p
 
 
@@ -149,6 +163,13 @@ def parse_args(argv=None) -> argparse.Namespace:
     if args.dt is None:
         args.dt = 1.0 / args.n_diff_steps
     return args
+
+
+def _csho_time_scale_fn(args):
+    if getattr(args, "csho_tau", None) is not None:
+        tau = args.csho_tau
+        return lambda t, T: torch.tensor(tau, dtype=torch.float32)
+    return None
 
 
 def build_method_state(args, N: int, device, sigma_ab=None):
@@ -244,6 +265,78 @@ def _calibrate_csho_sigma(model, train_loader, N: int, gamma_self: float, gamma_
     return a, b
 
 
+def train_encoder_only(args: argparse.Namespace, seed: int) -> None:
+    """Train just the encoder (init_loss / readout_loss, no score net, no diffusion) and save a
+    checkpoint. Used to produce one shared, frozen encoder per seed that csho/ddpm/sdm each train
+    their own score net on top of (via --frozen-encoder-dir), isolating the reverse-dynamics
+    mechanism as the only thing that varies between methods."""
+    torch.manual_seed(seed)
+    device = torch.device(args.device)
+
+    train_ds = make_dataset(args, args.split)
+    task_names = train_ds.task_names
+    N = len(task_names)
+
+    target_norm_stats = _get_or_create_target_norm_stats(train_ds, args.problem, task_names)
+    target_mean = [target_norm_stats[name]["mean"] for name in task_names]
+    target_std = [target_norm_stats[name]["std"] for name in task_names]
+
+    steps_per_epoch = len(train_ds) // args.batch_size
+    total_steps = args.n_epochs * steps_per_epoch
+    train_sampler = RandomSampler(train_ds, replacement=True, num_samples=total_steps * args.batch_size)
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, sampler=train_sampler,
+                               num_workers=args.num_workers, collate_fn=collate_fn, drop_last=True,
+                               persistent_workers=args.num_workers > 0)
+
+    is_spatial = args.score_arch in ("fno", "unet_model")
+    cond_in_ch = train_ds[0]["conditioning"].shape[0]
+    if is_spatial:
+        model = SpatialFieldModel(task_names, cond_in_ch=cond_in_ch, out_hw=(args.image_size, args.image_size),
+                                   backbone_ch=args.backbone_channels, base_ch=args.base_channels,
+                                   n_downsample=args.n_downsample, init_ch=args.fno_init_channels).to(device)
+    else:
+        model = PhysicsModel(task_names, cond_in_ch=cond_in_ch, out_hw=(args.image_size, args.image_size),
+                              latent_dim=args.latent_dim, backbone_ch=args.backbone_channels,
+                              base_ch=args.base_channels, n_downsample=args.n_downsample).to(device)
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    model.train()
+    pbar = tqdm(total=total_steps, desc=f"[{args.problem}/encoder-only/{args.score_arch}] seed={seed}")
+    for step, batch in enumerate(train_loader):
+        conditioning = batch["conditioning"].to(device)
+        if "elliptic_params" in batch:
+            batch["elliptic_params"] = batch["elliptic_params"].to(device)
+        targets = [t.to(device) for t in batch["tasks"]]
+        targets_norm = _normalize_targets(targets, target_mean, target_std)
+        model_conditioning = _model_input_conditioning(args, batch, conditioning)
+        X, K_self, K_global, feat, y0 = _encode_state(args, model, task_names, model_conditioning, is_spatial)
+
+        if is_spatial:
+            loss = torch.zeros((), device=device)
+            for name, target_n in zip(task_names, targets_norm):
+                loss = loss + F.l1_loss(y0[name], target_n)
+        else:
+            loss = torch.zeros((), device=device)
+            for name, y0_t, target_n in zip(task_names, [y0[n] for n in task_names], targets_norm):
+                loss = loss + F.l1_loss(y0_t, target_n)
+            for name, x, target_n in zip(task_names, X, targets_norm):
+                pred = model.decode(name, x[0])
+                loss = loss + F.l1_loss(pred, target_n)
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        pbar.set_postfix(loss=f"{loss.item():.4f}")
+        pbar.update(1)
+    pbar.close()
+
+    os.makedirs(args.save_encoder_dir, exist_ok=True)
+    ckpt_path = os.path.join(args.save_encoder_dir, f"seed{seed}.pt")
+    torch.save({"model_state_dict": model.state_dict(), "is_spatial": is_spatial,
+                "task_names": task_names, "cond_in_ch": cond_in_ch}, ckpt_path)
+    print(f"[encoder-only] seed={seed}: saved to {ckpt_path}")
+
+
 def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
     torch.manual_seed(seed)
     device = torch.device(args.device)
@@ -287,6 +380,15 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
                               latent_dim=args.latent_dim, backbone_ch=args.backbone_channels,
                               base_ch=args.base_channels, n_downsample=args.n_downsample).to(device)
 
+    frozen_encoder = args.frozen_encoder_dir is not None
+    if frozen_encoder:
+        ckpt_path = os.path.join(args.frozen_encoder_dir, f"seed{seed}.pt")
+        ckpt = torch.load(ckpt_path, map_location=device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        for p in model.parameters():
+            p.requires_grad_(False)
+        model.eval()
+
     is_csho = args.method in METHOD_CONFIGS
     if args.score_arch == "fno":
         if is_csho:
@@ -313,7 +415,10 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
         score_net = FlatScoreNetwork(N, args.latent_dim, model.backbone.out_ch,
                                       n_blocks=args.score_blocks, n_heads=args.score_heads).to(device)
 
-    optimizer = torch.optim.Adam(list(model.parameters()) + list(score_net.parameters()), lr=args.lr)
+    if frozen_encoder:
+        optimizer = torch.optim.Adam(score_net.parameters(), lr=args.lr)
+    else:
+        optimizer = torch.optim.Adam(list(model.parameters()) + list(score_net.parameters()), lr=args.lr)
 
     gamma_self, gamma_couple = calibrate_coupled_gammas(
         args.alpha_list[0], args.beta_list[0], args.k_reference, args.k_reference, N,
@@ -328,7 +433,7 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
         g_matrix = state["g_matrix"]
         params = precompute_transition_params(
             N, gamma_self, gamma_couple, args.alpha_list, args.beta_list, args.k_reference, coupling,
-            args.n_diff_steps, args.dt, lambda t, T: g_matrix, args.constant_k, None,
+            args.n_diff_steps, args.dt, lambda t, T: g_matrix, args.constant_k, _csho_time_scale_fn(args),
         )
     else:
         state = build_method_state(args, N, device)
@@ -339,7 +444,8 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
 
     nan_events, explosion_events, n_steps = 0, 0, 0
 
-    model.train()
+    if not frozen_encoder:
+        model.train()
     score_net.train()
     pbar = tqdm(total=total_steps, desc=f"[{args.problem}/{args.method}/{args.score_arch}] seed={seed}")
     for step, batch in enumerate(train_loader):
@@ -362,7 +468,7 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
             X_flat = torch.cat([X[i][0].reshape(-1, 1) for i in range(N)], dim=-1)
             Z0 = torch.cat([X_flat, torch.zeros_like(X_flat)], dim=-1)
             Phi_t, _ = params[t_idx - 1]
-            q = elapsed_time_at_step(t_idx, args.n_diff_steps, args.dt, None)
+            q = elapsed_time_at_step(t_idx, args.n_diff_steps, args.dt, _csho_time_scale_fn(args))
             Zt, score_target = sample_and_analytic_score_target(Z0, Phi_t, N, gamma_self, gamma_couple, q)
             X_t = [[Zt[:, i:i + 1].reshape(*orig_shape)] for i in range(N)]
             V_t = [[Zt[:, N + i:N + i + 1].reshape(*orig_shape)] for i in range(N)]
@@ -472,7 +578,7 @@ def evaluate(args, model, score_net, val_loader, device, task_names, state, gamm
                 X_cur, V_cur = anderson_reverse_step_coupled_gamma(
                     X_cur, V_cur, K_self, K_global, score_outputs, t_idx, args.n_diff_steps,
                     args.alpha_list, args.beta_list, gamma_self, gamma_couple,
-                    coupling, args.constant_k, args.dt, G,
+                    coupling, args.constant_k, args.dt, G, time_scale_fn=_csho_time_scale_fn(args),
                 )
             final_latents = [X_cur[i][0] for i in range(N)]
         elif args.method == "ddpm":
@@ -560,6 +666,15 @@ def evaluate(args, model, score_net, val_loader, device, task_names, state, gamm
 
 def main():
     args = parse_args()
+
+    if args.encoder_only:
+        if not args.save_encoder_dir:
+            raise ValueError("--encoder-only requires --save-encoder-dir")
+        for seed in args.seeds:
+            train_encoder_only(args, seed)
+        print(f"Done. Encoder checkpoints written to {args.save_encoder_dir}")
+        return
+
     os.makedirs(args.out_dir, exist_ok=True)
 
     per_seed_results: Dict[int, Dict[str, float]] = {}
