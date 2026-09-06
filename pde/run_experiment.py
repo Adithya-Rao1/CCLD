@@ -4,6 +4,7 @@ import argparse
 import os
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 import yaml
@@ -201,10 +202,14 @@ def build_method_state(args, N: int, device, sigma_ab=None):
     raise ValueError(f"Unknown method {args.method!r}")
 
 
-def relative_l2_error(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> float:
+def relative_l2_error_per_sample(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     num = torch.linalg.norm((pred - target).flatten(1), dim=-1)
     den = torch.linalg.norm(target.flatten(1), dim=-1).clamp_min(eps)
-    return (num / den).mean().item()
+    return num / den
+
+
+def relative_l2_error(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> float:
+    return relative_l2_error_per_sample(pred, target, eps).mean().item()
 
 
 def spectral_l2_error(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> float:
@@ -530,17 +535,25 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
         gain = score_net.output_gain.detach().cpu().tolist()
         print(f"[debug-rollout] trained output_gain per task ({list(zip(task_names, gain))})")
 
-    metrics = evaluate(args, model, score_net, val_loader, device, task_names, state, gamma_self, gamma_couple,
-                        is_spatial, target_mean, target_std)
+    metrics, per_sample_rel_l2, sample_maps = evaluate(
+        args, model, score_net, val_loader, device, task_names, state, gamma_self, gamma_couple,
+        is_spatial, target_mean, target_std,
+    )
     metrics["nan_events"] = float(nan_events)
     metrics["explosion_events"] = float(explosion_events)
     metrics["n_train_steps"] = float(n_steps)
+
+    os.makedirs(args.out_dir, exist_ok=True)
+    write_json(per_sample_rel_l2, os.path.join(args.out_dir, f"{args.method}_per_sample_rel_l2_seed{seed}.json"))
+    np.savez(os.path.join(args.out_dir, f"{args.method}_sample_maps_seed{seed}.npz"), **sample_maps)
+
     return metrics
 
 
 @torch.no_grad()
 def evaluate(args, model, score_net, val_loader, device, task_names, state, gamma_self, gamma_couple,
-             is_spatial: bool = False, target_mean=None, target_std=None) -> Dict[str, float]:
+             is_spatial: bool = False, target_mean=None, target_std=None,
+             ) -> Tuple[Dict[str, float], Dict[str, List[float]], Dict[str, np.ndarray]]:
     model.eval()
     score_net.eval()
     is_csho = state["is_csho"]
@@ -549,6 +562,8 @@ def evaluate(args, model, score_net, val_loader, device, task_names, state, gamm
     sums: Dict[str, float] = {}
     counts: Dict[str, int] = {}
     rollout_errs: List[List[float]] = []
+    per_sample_rel_l2: Dict[str, List[float]] = {}
+    sample_maps: Dict[str, np.ndarray] = {}
     first_batch = True
 
     for batch in val_loader:
@@ -618,11 +633,19 @@ def evaluate(args, model, score_net, val_loader, device, task_names, state, gamm
         preds = _denormalize_preds(preds_norm, target_mean, target_std)
 
         for name, pred, target in zip(task_names, preds, targets):
-            rel = relative_l2_error(pred, target)
+            rel_per_sample = relative_l2_error_per_sample(pred, target)
+            rel = rel_per_sample.mean().item()
             spec = spectral_l2_error(pred, target)
             for k, v in ((f"{name}_rel_l2", rel), (f"{name}_spectral_l2", spec)):
                 sums[k] = sums.get(k, 0.0) + v
                 counts[k] = counts.get(k, 0) + 1
+            per_sample_rel_l2.setdefault(name, []).extend(rel_per_sample.detach().cpu().tolist())
+
+        if first_batch:
+            n_show = min(4, targets[0].shape[0])
+            for name, pred, target in zip(task_names, preds, targets):
+                sample_maps[f"{name}_pred"] = pred[:n_show].detach().cpu().numpy()
+                sample_maps[f"{name}_target"] = target[:n_show].detach().cpu().numpy()
 
         if args.problem in ("TE_heat", "E_flow", "VA"):
             pred_by_name = dict(zip(task_names, [p.squeeze(1) for p in preds]))
@@ -665,7 +688,7 @@ def evaluate(args, model, score_net, val_loader, device, task_names, state, gamm
     if rollout_errs:
         for step in range(len(rollout_errs[0])):
             metrics[f"elder_rollout_step{step + 1}_rel_l2"] = sum(r[step] for r in rollout_errs) / len(rollout_errs)
-    return metrics
+    return metrics, per_sample_rel_l2, sample_maps
 
 
 def main():

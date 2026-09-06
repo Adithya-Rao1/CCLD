@@ -45,7 +45,7 @@ def make_ground_truth(
     device=None,
     dtype: torch.dtype = torch.float32,
 ) -> GroundTruthCoupledOU:
-    if N < 2 or (0.0 <= coupling_strength < 1.0):
+    if N < 2 or not (0.0 <= coupling_strength < 1.0):
         raise ValueError
 
     g = torch.Generator().manual_seed(seed)
