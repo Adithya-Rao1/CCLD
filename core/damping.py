@@ -5,7 +5,7 @@ from typing import List, Literal, Optional, Tuple
 
 import torch
 
-from core.drift import _mean_frob_norm
+from core.drift import _mean_frob_norm, _time_scale
 
 DampingRegime = Literal["underdamped", "critically_damped", "overdamped"]
 
@@ -57,12 +57,13 @@ def calibrate_gammas_for_regime(
     return [calibrate_gamma_for_regime(alpha[i], k_reference[i], regime, target_zeta) for i in range(len(alpha))]
 
 
-def realized_k_i(K_self_i: List[torch.Tensor], K_global: List[torch.Tensor], t: torch.Tensor, T: int, constant_k: bool = False) -> float:
+def realized_k_i(K_self_i: List[torch.Tensor], K_global: List[torch.Tensor], t: torch.Tensor, T: int, constant_k: bool = False,
+                  k_global_reference: float = 1.0) -> float:
     norm_self = _mean_frob_norm(K_self_i)
     if constant_k:
-        norm_global = torch.as_tensor(1.0)
+        norm_global = torch.as_tensor(k_global_reference)
     else:
-        time_scale = (T - t) / (t + T)
+        time_scale = _time_scale(t, T)
         norm_global = time_scale * _mean_frob_norm(K_global)
     return float((norm_self + norm_global).item())
 
@@ -75,7 +76,8 @@ def realized_damping_ratios(
     t: torch.Tensor,
     T: int,
     constant_k: bool = False,
+    k_global_reference: float = 1.0,
 ) -> List[float]:
     N = len(alpha)
-    k_vals = [realized_k_i(K_self[i], K_global, t, T, constant_k) for i in range(N)]
+    k_vals = [realized_k_i(K_self[i], K_global, t, T, constant_k, k_global_reference) for i in range(N)]
     return [effective_damping_ratio(alpha[i], gamma[i], k_vals[i]) for i in range(N)]

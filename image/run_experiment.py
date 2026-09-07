@@ -11,7 +11,8 @@ import yaml
 from torch.utils.data import DataLoader
 
 from core.baselines import (
-    ddpm_reverse_step_n, ddpm_forward_n, make_ddpm_schedule, vp_beta_t, vp_sde_drift_n, vp_sde_reverse_step_n,
+    ddpm_reverse_step_n, ddpm_forward_n, make_ddpm_schedule, vp_alpha_bar, vp_beta_t, vp_sde_forward_marginal_n,
+    vp_sde_reverse_step_n,
 )
 from core.coupling import build_coupling_matrix
 from core.damping import calibrate_gammas_for_regime
@@ -149,14 +150,6 @@ def combined_grad_buckets(named_modules) -> Dict[str, float]:
         for k, v in grad_norm_buckets(module).items():
             out[f"{name}.{k}"] = v
     return out
-
-
-def vp_forward_step_with_noise(X: List[torch.Tensor], beta_t: torch.Tensor, dt: float):
-    drift = vp_sde_drift_n(X, beta_t)
-    g = torch.sqrt(beta_t)
-    noise = [torch.randn_like(x) for x in X]
-    X_next = [x + d * dt + g * math.sqrt(dt) * n for x, d, n in zip(X, drift, noise)]
-    return X_next, noise
 
 
 def parse_float_list(s, n: int) -> List[float]:
@@ -339,9 +332,9 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
                     Xt, noise = ddpm_forward_n(X0_flat, torch.tensor(t_idx, device=device), ac)
                     eps_pred = flat_fn(Xt, t_idx)
                 else:
-                    beta_t = vp_beta_t(torch.tensor(t_idx / args.n_diff_steps, device=device), 1.0)
-                    Xt, noise = vp_forward_step_with_noise(X0_flat, beta_t, 1.0 / args.n_diff_steps)
-                    eps_pred = flat_fn(Xt, t_idx / args.n_diff_steps)
+                    t_cont = t_idx / args.n_diff_steps
+                    Xt, noise = vp_sde_forward_marginal_n(X0_flat, torch.tensor(t_cont, device=device))
+                    eps_pred = flat_fn(Xt, t_cont)
                 diffusion_loss = sum(F.mse_loss(p, n) for p, n in zip(eps_pred, noise))
 
                 readout_loss = torch.zeros((), device=device)
@@ -413,15 +406,16 @@ def evaluate(args, model, score_net, val_loader, device, tasks, num_classes, sta
             X_flat = [(x - torch.sqrt(1 - ac1) * e) / torch.sqrt(ac1) for x, e in zip(X_flat, eps_pred)]
             final_latents = {t: X_flat[i] for i, t in enumerate(tasks)}
         else:
-            X_flat = [x[0] for x in X]
+            X0_flat = [x[0] for x in X]
             flat_fn = make_flat_score_fn(score_net, feat)
             dt_step = 1.0 / args.n_diff_steps
+            X_flat, _ = vp_sde_forward_marginal_n(X0_flat, torch.tensor(1.0, device=device))
             for t_idx in reversed(range(1, args.n_diff_steps + 1)):
                 t_cont = t_idx / args.n_diff_steps
                 beta_t = vp_beta_t(torch.tensor(t_cont, device=device), 1.0)
+                ac_t = vp_alpha_bar(torch.tensor(t_cont, device=device))
                 eps_pred = flat_fn(X_flat, t_cont)
-                g_t = torch.sqrt(beta_t)
-                score = [-e / (g_t * math.sqrt(dt_step) + 1e-8) for e in eps_pred]
+                score = [-e / torch.sqrt(1.0 - ac_t).clamp_min(1e-8) for e in eps_pred]
                 X_flat = vp_sde_reverse_step_n(X_flat, score, beta_t, dt_step)
             final_latents = {t: X_flat[i] for i, t in enumerate(tasks)}
 

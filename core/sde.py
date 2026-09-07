@@ -5,7 +5,7 @@ from typing import Callable, List, Literal, Optional, Tuple
 
 import torch
 
-from core.drift import drift_fn_n
+from core.drift import _time_scale, drift_fn_n
 
 DiffusionMode = Literal["shared", "independent"]
 
@@ -69,6 +69,8 @@ def em_step_n(
     primary_index: int = 0,
     scale_damping_with_time: bool = True,
     time_scale_fn: Optional[Callable[[torch.Tensor, int], torch.Tensor]] = None,
+    scale_kinematics_with_time: bool = True,
+    scale_diffusion_with_time: bool = True,
 ):
     N = len(X)
     dV = drift_fn_n(
@@ -76,6 +78,10 @@ def em_step_n(
         coupling_matrix=coupling_matrix_drift, use_gamma=use_gamma, constant_k=constant_k,
         scale_damping_with_time=scale_damping_with_time, time_scale_fn=time_scale_fn,
     )
+    time_scale = _time_scale(t, T, time_scale_fn)
+    kin_scale = time_scale if scale_kinematics_with_time else 1.0
+    if scale_diffusion_with_time:
+        G = G * time_scale.clamp_min(0).sqrt()
 
     mu = [[v - dv * dt for v, dv in zip(V[i], dV[i])] for i in range(N)]
 
@@ -94,7 +100,7 @@ def em_step_n(
                 v_i.append(mu[i][k] + sqrt_dt * G[i, i] * torch.randn_like(mu[i][k]))
         V_next.append(v_i)
 
-    X_next = [[x + v * dt for x, v in zip(X[i], V_next[i])] for i in range(N)]
+    X_next = [[x + v * kin_scale * dt for x, v in zip(X[i], V_next[i])] for i in range(N)]
 
     z_list = [primary_noise[i] / primary_sigma[i] for i in range(N)]
     sigma_list = [sqrt_dt * primary_sigma[i] for i in range(N)]
@@ -122,6 +128,8 @@ def reverse_step_n(
     primary_index: int = 0,
     scale_damping_with_time: bool = True,
     time_scale_fn: Optional[Callable[[torch.Tensor, int], torch.Tensor]] = None,
+    scale_kinematics_with_time: bool = True,
+    scale_diffusion_with_time: bool = True,
 ):
     N = len(X)
     t_tensor = torch.as_tensor(t, device=X[0][0].device, dtype=X[0][0].dtype)
@@ -130,6 +138,10 @@ def reverse_step_n(
         coupling_matrix=coupling_matrix_drift, use_gamma=use_gamma, constant_k=constant_k,
         scale_damping_with_time=scale_damping_with_time, time_scale_fn=time_scale_fn,
     )
+    time_scale = _time_scale(t_tensor, T, time_scale_fn)
+    kin_scale = time_scale if scale_kinematics_with_time else 1.0
+    if scale_diffusion_with_time:
+        G = G * time_scale.clamp_min(0).sqrt()
     Sigma = G @ G.T
 
     sqrt_dt = math.sqrt(dt)
@@ -153,7 +165,7 @@ def reverse_step_n(
             v_i.append(V[i][k].float() + dv - score_correction * dt + noise)
         V_new.append(v_i)
 
-    X_new = [[X[i][k].float() + V_new[i][k] * dt for k in range(len(X[i]))] for i in range(N)]
+    X_new = [[X[i][k].float() + V_new[i][k] * kin_scale * dt for k in range(len(X[i]))] for i in range(N)]
     return X_new, V_new
 
 

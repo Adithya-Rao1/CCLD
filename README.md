@@ -38,6 +38,11 @@ VP-SDE, no coupling) -- see `core/baselines.py`.
 
 Each experiment directory has its own README with exact commands, data requirements, and metrics.
 
+**Current status:** `synthetic/` is the only experiment that's runnable end-to-end right now (no
+downloads, no GPU required, closed-form ground truth) and is the one this README's Quickstart
+covers. `image/` and `pde/` are code-complete and import cleanly but haven't been run against real
+data yet -- see their own READMEs and "Known gaps" below.
+
 ## `core/` API map
 
 | Module | Provides |
@@ -55,29 +60,81 @@ Each experiment directory has its own README with exact commands, data requireme
 ## Install
 
 ```
+conda create -n coupledsho python=3.10
 conda activate coupledsho
-pip install -r requirements.txt
+pip install -e .
 ```
 
-`requirements.txt` covers the actual import graph (torch, torchvision, numpy, scipy, pyyaml,
-matplotlib, pillow, pyarrow, h5py, huggingface_hub, requests). Install torch for your platform/CUDA
-build first if you need a specific one.
+This is a pip-installable package (`pyproject.toml`) -- `pip install -e .` installs the repo
+editable, plus all dependencies (torch, torchvision, numpy, scipy, pyyaml, matplotlib, pillow,
+pyarrow, h5py, huggingface_hub, requests). Install torch for your platform/CUDA build first
+(https://pytorch.org/get-started/locally/) if you need a specific one -- otherwise pip resolves
+whatever default build PyPI gives it.
 
-## Quickstart
+`requirements.txt` is kept as an alternative if you'd rather not install the package itself:
+`pip install -r requirements.txt`.
 
-Run in this order -- each step is cheap and catches a different class of problem before you commit
-to a real (possibly multi-hour, multi-GB) experiment run:
+Both pin `numpy<2`: torchvision/pyarrow/h5py wheels are commonly built against the NumPy 1.x ABI,
+and NumPy 2.x can fail at import with `A module that was compiled using NumPy 1.x cannot be run in
+NumPy 2.x`. If you already have NumPy 2.x installed in the target environment, downgrade it
+(`pip install "numpy<2"`) rather than overriding this pin.
+
+## Quickstart: synthetic experiments
+
+`synthetic/` is the only experiment that's runnable end-to-end right now -- closed-form Gaussian
+ground truth, no downloads, no GPU required. (`image/` and `pde/` are code-complete but need real
+datasets downloaded first; see "Per-experiment READMEs" below.) There are two ways to run it:
+
+### Option A -- one config via the CLI
+
+```
+python -m synthetic.run_experiment \
+  --N 5 \
+  --coupling-strength 0.6 \
+  --method csho \
+  --damping-regime critically_damped \
+  --seeds 0,1,2,3,4 \
+  --device cpu \
+  --out-dir results/experiment_3_synthetic/csho_N5
+```
+
+`--method` is one of `csho`, `csho_independent`, `csho_pairwise`, `ddpm`, `sdm`. Pass `--quick` for
+a several-second CPU smoke run. Run `python -m synthetic.run_experiment --help` for the full flag
+reference (schedule, noise, damping, training, evaluation), or see
+[`synthetic/README.md`](synthetic/README.md) for a walkthrough.
+
+### Option B -- the full N=2..5 CSHO-vs-DDPM-vs-SDM sweep
+
+```
+bash run_final_synthetic_experiments.sh [N_SEEDS] [N_TRAIN_ITERS] [N_SAMPLES]
+```
+
+Defaults: `20 10000 40000` (i.e. `bash run_final_synthetic_experiments.sh` with no args uses
+these) -- chosen for statistical rigor: paired Wilcoxon can reach p<0.001 instead of the p=0.0625
+floor at 5 seeds, and 40000 eval samples keeps the KL estimator's own noise well below the gap
+between methods. It trains DDPM and SDM baselines and the champion CSHO configuration
+(Anderson-corrected reverse SDE, mode-decoupled critical damping, analytic closed-form DSM score
+target, per-N-calibrated noise) at N=2,3,4,5, all at the same seed/iteration/sample budget, and
+writes the final comparison table to
+`results/experiment_3_synthetic/final_champion_seeds<N>_iters<I>/analytic_n_sweep_summary.csv`.
+Safe to re-run or resume after an interruption -- it skips any baseline already generated. Uses
+CUDA automatically if available; expect several hours at the default budget on even a powerful GPU
+(e.g. an A100), since the score nets are small MLPs and the bottleneck is Python-loop overhead
+across the per-population tensor structure, not GPU compute.
+
+### Sanity checks
+
+Cheap, and catch a different class of problem before committing to either run above:
 
 ```
 python -m tests.test_hypoellipticity        # controllability-Gramian check across the full N/coupling/damping grid
 python -m tests.test_sde_integrator          # em_step_n / reverse_step_n / ndsm_loss_n shape & finiteness
 python -m tests.test_drift_properties        # drift_fn_n invariants: permutation equivariance, coupling separability, etc.
-python -m synthetic.run_experiment --quick --method csho --device cpu --out-dir results/smoke
 python -m tests.test_experiments_smoke       # all 3 experiments, on tiny in-memory fixtures
 python run_all.py --mode smoke               # exp1/exp2 skip (no data root configured), exp3 runs for real
 ```
 
-Then, once you've downloaded real data (see each experiment's README):
+### `image/` and `pde/`, once you have real data
 
 ```
 python -m image.run_experiment --config image/config.yaml --data-root /data/nyudv2 --method csho ...

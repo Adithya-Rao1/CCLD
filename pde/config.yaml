@@ -19,15 +19,13 @@ model:
 
 diffusion:
   method: "csho"                  # csho | csho_independent | csho_shared_g | csho_independent_g | csho_pairwise | ddpm | sdm
-  n_diff_steps: 2
-  dt: 0.5
-  sigma: 0.1
+  n_diff_steps: 20
   damping_regime: "critically_damped"  # underdamped | critically_damped | overdamped
   target_zeta: null
   alpha: "1.0"
   beta: "0.5"
   k_reference: 1.0
-  constant_k: false
+  constant_k: true
   lambda_ndsm: 1.0
 
 training:

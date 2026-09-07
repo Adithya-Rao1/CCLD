@@ -11,7 +11,8 @@ import torch.nn.functional as F
 import yaml
 
 from core.baselines import (
-    ddpm_forward_n, ddpm_reverse_step_n, make_ddpm_schedule, vp_beta_t, vp_sde_forward_step_n, vp_sde_reverse_step_n,
+    ddpm_forward_n, ddpm_reverse_step_n, make_ddpm_schedule, vp_alpha_bar, vp_beta_t, vp_sde_forward_marginal_n,
+    vp_sde_reverse_step_n,
 )
 from core.coupling import build_coupling_matrix
 from core.damping import calibrate_gammas_for_regime
@@ -438,15 +439,13 @@ def train_sdm(args, gt: GroundTruthCoupledOU, device) -> nn.Module:
     flat_net_cls = SiloedFlatScoreNet if args.siloed_score_net else FlatScoreNet
     score_net = flat_net_cls(N, args.hidden_dim, args.n_layers, args.time_embed_dim).to(device)
     optimizer = torch.optim.Adam(score_net.parameters(), lr=args.lr)
-    dt_step = 1.0 / args.n_diff_steps
 
     for _ in range(args.n_train_iters):
         X0 = gt.sample_stationary(args.batch_size).to(device)
         X0_flat = [X0[:, i : i + 1] for i in range(N)]
         t_idx = torch.randint(1, args.n_diff_steps + 1, (1,)).item()
         t_cont = t_idx / args.n_diff_steps
-        beta_t = vp_beta_t(torch.tensor(t_cont, device=device), 1.0)
-        Xt, noise = vp_sde_forward_step_n(X0_flat, beta_t, dt_step)
+        Xt, noise = vp_sde_forward_marginal_n(X0_flat, torch.tensor(t_cont, device=device))
         eps_pred = score_net(Xt, t_cont)
         loss = sum(F.mse_loss(p, n) for p, n in zip(eps_pred, noise))
         optimizer.zero_grad()
@@ -465,9 +464,9 @@ def sample_sdm(args, score_net, device) -> torch.Tensor:
     for t_idx in reversed(range(1, args.n_diff_steps + 1)):
         t_cont = t_idx / args.n_diff_steps
         beta_t = vp_beta_t(torch.tensor(t_cont, device=device), 1.0)
+        ac_t = vp_alpha_bar(torch.tensor(t_cont, device=device))
         eps_pred = score_net(X, t_cont)
-        g_t = torch.sqrt(beta_t)
-        score = [-e / (g_t * math.sqrt(dt_step) + 1e-8) for e in eps_pred]
+        score = [-e / torch.sqrt(1.0 - ac_t).clamp_min(1e-8) for e in eps_pred]
         X = vp_sde_reverse_step_n(X, score, beta_t, dt_step)
     return torch.cat(X, dim=-1)
 

@@ -1,0 +1,183 @@
+from __future__ import annotations
+
+import math
+from typing import Dict
+
+import torch
+import torch.nn.functional as F
+
+
+def _deriv_kernels(dx: float, dy: float, device, dtype):
+    kx = torch.tensor([[-1, 0, 1]], dtype=dtype, device=device).view(1, 1, 1, 3) / (2 * dx)
+    ky = torch.tensor([[-1], [0], [1]], dtype=dtype, device=device).view(1, 1, 3, 1) / (2 * dy)
+    return kx, ky
+
+
+def _ddx(field: torch.Tensor, kx: torch.Tensor) -> torch.Tensor:
+    return F.conv2d(field.unsqueeze(1), kx, padding=(0, 1)).squeeze(1)
+
+
+def _ddy(field: torch.Tensor, ky: torch.Tensor) -> torch.Tensor:
+    return F.conv2d(field.unsqueeze(1), ky, padding=(1, 0)).squeeze(1)
+
+
+def pde_residual_metric(residual: torch.Tensor) -> float:
+    n = residual.shape[-2] * residual.shape[-1]
+    return (torch.norm(residual.flatten(1), 2, dim=1) / n).mean().item()
+
+
+E_FLOW_GRID = {"dx": 1.28e-3 / 128, "dy": 1.28e-3 / 128}
+
+# DiffusionPDE generate_VA.py division defaults.
+E_FLOW_FLOW_CONTINUITY_SCALE = 1e3     # generate_E_flow.py:61
+E_FLOW_CURRENT_CONTINUITY_SCALE = 1e6  # generate_E_flow.py:62
+
+
+def e_flow_residual(
+    fields: Dict[str, torch.Tensor],
+    flow_continuity_scale: float = E_FLOW_FLOW_CONTINUITY_SCALE,
+    current_continuity_scale: float = E_FLOW_CURRENT_CONTINUITY_SCALE,
+) -> Dict[str, torch.Tensor]:
+    kappa, ec_V, u_flow, v_flow = fields["kappa"], fields["ec_V"], fields["u_flow"], fields["v_flow"]
+    kx, ky = _deriv_kernels(E_FLOW_GRID["dx"], E_FLOW_GRID["dy"], ec_V.device, ec_V.dtype)
+
+    flow_continuity = (_ddx(u_flow, kx) + _ddy(v_flow, ky)) / flow_continuity_scale
+
+    grad_V_x = _ddx(ec_V, kx)
+    grad_V_y = _ddy(ec_V, ky)
+    current_continuity = (_ddx(kappa * grad_V_x, kx) + _ddy(kappa * grad_V_y, ky)) / current_continuity_scale
+
+    return {"flow_continuity": flow_continuity, "current_continuity": current_continuity}
+
+
+VA_GRID = {"dx": (40 / 128) * 1e-3, "dy": (40 / 128) * 1e-3}
+VA_OMEGA = math.pi * 1e5
+VA_C_AC = 1.48144e3
+VA_ACOUSTIC_SCALE = 1e6    # generate_VA.py:127-130 (real and imag both)
+VA_STRUCTURE_SCALE = 1e3   # generate_VA.py:131-133 (all four real/imag terms)
+
+
+def va_residual(
+    fields: Dict[str, torch.Tensor],
+    acoustic_scale: float = VA_ACOUSTIC_SCALE,
+    structure_scale: float = VA_STRUCTURE_SCALE,
+) -> Dict[str, torch.Tensor]:
+    rho_water = fields["rho_water"]
+    p_re, p_im = fields["p_t_re"], fields["p_t_im"]
+    Sxx_re, Sxx_im = fields["Sxx_re"], fields["Sxx_im"]
+    Sxy_re, Sxy_im = fields["Sxy_re"], fields["Sxy_im"]
+    Syy_re, Syy_im = fields["Syy_re"], fields["Syy_im"]
+    x_u_re, x_u_im = fields["x_u_re"], fields["x_u_im"]
+    x_v_re, x_v_im = fields["x_v_re"], fields["x_v_im"]
+
+    kx, ky = _deriv_kernels(VA_GRID["dx"], VA_GRID["dy"], p_re.device, p_re.dtype)
+
+    def acoustic_residual(p: torch.Tensor) -> torch.Tensor:
+        grad_x = _ddx(p, kx)
+        grad_y = _ddy(p, ky)
+        laplace = _ddx(grad_x / rho_water, kx) + _ddy(grad_y / rho_water, ky)
+        return laplace + VA_OMEGA ** 2 * p / (rho_water * VA_C_AC ** 2)
+
+    return {
+        "acoustic_real": acoustic_residual(p_re) / acoustic_scale,
+        "acoustic_imag": acoustic_residual(p_im) / acoustic_scale,
+        "structure_x_real": (_ddx(Sxx_re, kx) + _ddy(Sxy_re, ky) + x_u_re) / structure_scale,
+        "structure_x_imag": (_ddx(Sxx_im, kx) + _ddy(Sxy_im, ky) + x_u_im) / structure_scale,
+        "structure_y_real": (_ddx(Sxy_re, kx) + _ddy(Syy_re, ky) + x_v_re) / structure_scale,
+        "structure_y_imag": (_ddx(Sxy_im, kx) + _ddy(Syy_im, ky) + x_v_im) / structure_scale,
+    }
+
+
+TE_HEAT_GRID = {"dx": 1e-3, "dy": 1e-3}
+TE_HEAT_F = 4e9
+TE_HEAT_K0 = 2 * math.pi * TE_HEAT_F / 3e8
+TE_HEAT_OMEGA = 2 * math.pi * TE_HEAT_F
+TE_HEAT_Q = 1.602
+TE_HEAT_MU_R = 1.0
+TE_HEAT_EPS_0 = 8.854e-12
+TE_HEAT_KB = 8.6173e-5
+TE_HEAT_EG = 1.12
+
+# See E_FLOW_*_SCALE note above -- same DiffusionPDE generate_TE_heat.py convention.
+TE_HEAT_E_FIELD_RESIDUAL_SCALE = 1e6  # generate_TE_heat.py:171
+TE_HEAT_HEAT_RESIDUAL_SCALE = 1e6     # generate_TE_heat.py:172
+
+
+def _te_heat_mater_iden(elliptic_params: torch.Tensor, H: int, W: int, device, dtype) -> torch.Tensor:
+    e_a = (elliptic_params[:, 0] * 1e-3).view(-1, 1, 1)  # mm -> m, semi-major axis
+    e_b = (elliptic_params[:, 1] * 1e-3).view(-1, 1, 1)  # mm -> m, semi-minor axis
+    angle_rad = (elliptic_params[:, 2] * math.pi / 180.0).view(-1, 1, 1)  # degrees -> radians
+
+    coords_x = (torch.arange(H, device=device, dtype=dtype) - (H - 1) / 2) * TE_HEAT_GRID["dx"]
+    coords_y = (torch.arange(W, device=device, dtype=dtype) - (W - 1) / 2) * TE_HEAT_GRID["dy"]
+    xx, yy = torch.meshgrid(coords_x, coords_y, indexing="ij")
+    xx, yy = xx.unsqueeze(0), yy.unsqueeze(0)
+
+    cos_t, sin_t = torch.cos(angle_rad), torch.sin(angle_rad)
+    x_local = xx * cos_t + yy * sin_t
+    y_local = -xx * sin_t + yy * cos_t
+    membership = (x_local / e_a) ** 2 + (y_local / e_b) ** 2
+    return torch.where(membership <= 1.0, torch.ones_like(membership), -torch.ones_like(membership))
+
+
+TE_HEAT_MATER_INSIDE_RANGE = (100068292443.0, 299954624539.0)
+TE_HEAT_MATER_INSIDE_NORM_RANGE = (0.1, 0.9)
+TE_HEAT_MATER_OUTSIDE_RANGE = (10.000702606509638, 19.996693794649573)
+TE_HEAT_MATER_OUTSIDE_NORM_RANGE = (-0.9, -0.1)
+
+
+def te_heat_normalize_mater(mater: torch.Tensor, elliptic_params: torch.Tensor) -> torch.Tensor:
+    device, dtype = mater.device, mater.dtype
+    _, H, W = mater.shape
+    mater_iden = _te_heat_mater_iden(elliptic_params.to(device=device, dtype=dtype), H, W, device, dtype)
+
+    lo_in, hi_in = TE_HEAT_MATER_INSIDE_RANGE
+    nlo_in, nhi_in = TE_HEAT_MATER_INSIDE_NORM_RANGE
+    norm_in = (mater - lo_in) * (nhi_in - nlo_in) / (hi_in - lo_in) + nlo_in
+
+    lo_out, hi_out = TE_HEAT_MATER_OUTSIDE_RANGE
+    nlo_out, nhi_out = TE_HEAT_MATER_OUTSIDE_NORM_RANGE
+    norm_out = (mater - lo_out) * (nhi_out - nlo_out) / (hi_out - lo_out) + nlo_out
+
+    return torch.where(mater_iden > 1e-5, norm_in, norm_out)
+
+
+def _te_heat_positive_temperature(T_raw: torch.Tensor, floor: float = 1.0) -> torch.Tensor:
+    return F.softplus(T_raw) + floor
+
+
+def te_heat_residual(
+    fields: Dict[str, torch.Tensor],
+    elliptic_params: torch.Tensor,
+    e_field_scale: float = TE_HEAT_E_FIELD_RESIDUAL_SCALE,
+    heat_scale: float = TE_HEAT_HEAT_RESIDUAL_SCALE,
+) -> Dict[str, torch.Tensor]:
+    mater = fields["mater"]
+    T = _te_heat_positive_temperature(fields["T"])
+    Ez = torch.complex(fields["Ez_re"], fields["Ez_im"])
+
+    device, dtype = mater.device, mater.dtype
+    _, H, W = mater.shape
+    elliptic_params = elliptic_params.to(device=device, dtype=dtype)
+    mater_iden = _te_heat_mater_iden(elliptic_params, H, W, device, dtype)
+
+    sigma_coef_map = torch.where(mater_iden > 1e-5, mater, torch.zeros_like(mater))
+    sigma_map = TE_HEAT_Q * sigma_coef_map * torch.exp(-TE_HEAT_EG / (TE_HEAT_KB * T))
+    sigma_map = torch.where(mater_iden > 1e-5, sigma_map, torch.full_like(sigma_map, 1e-7))
+    rho_map = torch.where(mater_iden > 1e-5, torch.full_like(mater, 70.0), mater)
+    eps_r = torch.where(mater_iden > 1e-5, torch.full_like(mater, 11.7), torch.ones_like(mater))
+    K_E = TE_HEAT_MU_R * TE_HEAT_K0 ** 2 * (eps_r - 1j * sigma_map / (TE_HEAT_OMEGA * TE_HEAT_EPS_0))
+
+    kx_r, ky_r = _deriv_kernels(TE_HEAT_GRID["dx"], TE_HEAT_GRID["dy"], device, dtype)
+    c_dtype = torch.complex64 if Ez.dtype == torch.complex64 else torch.complex128
+    kx_c, ky_c = kx_r.to(c_dtype), ky_r.to(c_dtype)
+
+    grad_x_E = F.conv2d(Ez.unsqueeze(1), kx_c, padding=(0, 1))
+    grad_y_E = F.conv2d(Ez.unsqueeze(1), ky_c, padding=(1, 0))
+    laplace_E = (F.conv2d(grad_x_E, kx_c, padding=(0, 1)) + F.conv2d(grad_y_E, ky_c, padding=(1, 0))).squeeze(1)
+    result_E = laplace_E + K_E * Ez
+
+    laplace_T = _ddx(_ddx(T, kx_r), kx_r) + _ddy(_ddy(T, ky_r), ky_r)
+    result_T = (rho_map * laplace_T + 0.5 * sigma_map * (Ez * torch.conj(Ez))).real
+
+    return {"e_field": result_E / e_field_scale, "heat": result_T / heat_scale}

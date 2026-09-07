@@ -44,7 +44,6 @@ class FieldHead(nn.Module):
         self.trunk = nn.Sequential(ConvBlock(in_ch, base_ch), ConvBlock(base_ch, base_ch))
         self.y0_head = nn.Conv2d(base_ch, out_ch, 1)
         self.to_latent = nn.Linear(base_ch, latent_dim)
-        self.to_cond = nn.Linear(base_ch, latent_dim)
 
         readout_ch = max(latent_dim // 4, out_ch)
         self.readout_seed_hw = (out_hw[0] // 8, out_hw[1] // 8)
@@ -55,13 +54,12 @@ class FieldHead(nn.Module):
         self.readout_ch = readout_ch
         self.readout_out = nn.Conv2d(readout_ch, out_ch, 1)
 
-    def encode(self, shared_feat: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def encode(self, shared_feat: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         feat = self.trunk(shared_feat)
         pooled = feat.mean(dim=(-2, -1))
         latent = self.to_latent(pooled)
-        cond = self.to_cond(pooled)
         y0 = F.interpolate(self.y0_head(feat), size=self.out_hw, mode="bilinear", align_corners=False)
-        return latent, cond, y0
+        return latent, y0
 
     def decode(self, latent: torch.Tensor) -> torch.Tensor:
         B = latent.shape[0]
@@ -118,6 +116,7 @@ class MultiPhysicsScoreNetwork(nn.Module):
             nn.Sequential(nn.Linear(latent_dim, latent_dim), nn.SiLU(), nn.Linear(latent_dim, latent_dim))
             for _ in range(n_tasks)
         ])
+        self.output_gain = nn.Parameter(torch.ones(n_tasks))
 
     def forward(self, global_cond: torch.Tensor, V_query: List[List[torch.Tensor]], t) -> List[List[torch.Tensor]]:
         B = V_query[0][0].shape[0]
@@ -132,7 +131,7 @@ class MultiPhysicsScoreNetwork(nn.Module):
 
         out = []
         for i in range(self.n_tasks):
-            out.append([self.out_heads[i](tokens[:, i, :])])
+            out.append([self.out_heads[i](tokens[:, i, :]) * self.output_gain[i]])
         return out
 
 
@@ -176,16 +175,51 @@ class PhysicsModel(nn.Module):
             for name in self.task_names
         })
 
-    def encode(self, conditioning: torch.Tensor):
+    def encode(self, conditioning: torch.Tensor, k_reference: float = 1.0):
         feat, global_cond = self.backbone(conditioning)
+        B = conditioning.shape[0]
+        k_const = torch.full((B, 1), k_reference, device=conditioning.device, dtype=conditioning.dtype)
         X, K_self, K_global, y0 = [], [], [], {}
         for name in self.task_names:
-            latent, cond, y0_t = self.heads[name].encode(feat)
+            latent, y0_t = self.heads[name].encode(feat)
             X.append([latent])
-            K_self.append([cond])
-            K_global.append(global_cond)
+            K_self.append([k_const])
+            K_global.append(k_const)
             y0[name] = y0_t
         return X, K_self, K_global, global_cond, y0
 
     def decode(self, task_name: str, latent: torch.Tensor) -> torch.Tensor:
         return self.heads[task_name].decode(latent)
+
+
+class SpatialFieldModel(nn.Module):
+    def __init__(
+        self,
+        task_names: List[str],
+        cond_in_ch: int,
+        out_hw: Tuple[int, int] = (128, 128),
+        backbone_ch: int = 128,
+        base_ch: int = 32,
+        n_downsample: int = 3,
+        init_ch: int = 32,
+    ):
+        super().__init__()
+        self.task_names = list(task_names)
+        self.out_hw = out_hw
+        self.backbone = PhysicsBackbone(cond_in_ch, base_ch=base_ch, out_ch=backbone_ch, n_downsample=n_downsample)
+        self.init_heads = nn.ModuleDict({
+            name: nn.Sequential(ConvBlock(self.backbone.out_ch, init_ch), nn.Conv2d(init_ch, 1, 1))
+            for name in self.task_names
+        })
+
+    def encode(self, conditioning: torch.Tensor, k_reference: float = 1.0):
+        feat, _ = self.backbone(conditioning)
+        B = conditioning.shape[0]
+        k_const = torch.full((B, 1), k_reference, device=conditioning.device, dtype=conditioning.dtype)
+        X0 = {
+            name: F.interpolate(self.init_heads[name](feat), size=self.out_hw, mode="bilinear", align_corners=False)
+            for name in self.task_names
+        }
+        K_self = [[k_const] for _ in self.task_names]
+        K_global = [k_const for _ in self.task_names]
+        return X0, K_self, K_global

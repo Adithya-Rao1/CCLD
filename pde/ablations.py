@@ -27,7 +27,7 @@ def flatten_summary(summary: Dict[str, Dict[str, float]]) -> Dict[str, float]:
 
 
 def base_argv(args: argparse.Namespace) -> List[str]:
-    return [
+    argv = [
         "--data-root", args.data_root,
         "--problem", args.default_problem,
         "--split", args.split,
@@ -44,10 +44,13 @@ def base_argv(args: argparse.Namespace) -> List[str]:
         "--score-blocks", str(args.score_blocks),
         "--score-heads", str(args.score_heads),
         "--n-diff-steps", str(args.n_diff_steps),
-        "--dt", str(args.dt),
         "--num-workers", str(args.num_workers),
         "--device", args.device,
     ]
+
+    if args.dt is not None:
+        argv += ["--dt", str(args.dt)]
+    return argv
 
 
 def run_config(args: argparse.Namespace, label: str, extra_argv: List[str], out_subdir: str) -> Dict[int, Dict[str, float]]:
@@ -144,12 +147,6 @@ def _coupling_label(problem: str) -> str:
 
 
 def sweep_problem(args, results, significance_rows):
-    # pde-specific axis: sweep across all 7 problems at a fixed method/config. The `coupling`
-    # field folded in from each problem's metadata (bidirectional vs. unidirectional physics)
-    # is recorded alongside the metrics so results can separate "coupling helps under genuine
-    # bidirectional physics" (TE_heat, NS_heat, MHD, VA, Elder, diffusion_reaction) from
-    # "coupling is neutral under unidirectional physics" (E_flow) -- a real falsification
-    # opportunity for the CSHO coupling hypothesis, not just a completeness sweep.
     baseline = [None, None]
     for problem in ALL_PROBLEMS:
         argv = ["--problem", problem, "--method", "csho", "--damping-regime", args.default_damping_regime]
@@ -188,7 +185,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--score-blocks", type=int, default=3)
     p.add_argument("--score-heads", type=int, default=4)
     p.add_argument("--n-diff-steps", type=int, default=2)
-    p.add_argument("--dt", type=float, default=0.5)
+    p.add_argument("--dt", type=float, default=None)
     p.add_argument("--num-workers", type=int, default=2)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
 

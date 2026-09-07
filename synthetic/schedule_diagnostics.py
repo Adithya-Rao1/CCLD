@@ -7,7 +7,7 @@ import torch
 
 from core.coupling import build_coupling_matrix
 from core.damping import calibrate_gammas_for_regime
-from core.drift import drift_fn_n
+from core.drift import _time_scale, drift_fn_n
 from core.sde import build_g_matrix_n, reverse_step_n
 
 VARIANTS: Dict[str, Dict[str, bool]] = {
@@ -87,23 +87,23 @@ def _extract_Avx_Avv(
     return A_vx, A_vv
 
 
-def _generative_transition(A_vx: torch.Tensor, A_vv: torch.Tensor, dt: float) -> torch.Tensor:
+def _generative_transition(A_vx: torch.Tensor, A_vv: torch.Tensor, dt: float, time_scale=1.0) -> torch.Tensor:
     N = A_vx.shape[0]
     I = torch.eye(N)
     M = torch.zeros(2 * N, 2 * N)
-    M[:N, :N] = I + dt**2 * A_vx
-    M[:N, N:] = dt * (I + dt * A_vv)
+    M[:N, :N] = I + time_scale * dt**2 * A_vx
+    M[:N, N:] = time_scale * dt * (I + dt * A_vv)
     M[N:, :N] = dt * A_vx
     M[N:, N:] = I + dt * A_vv
     return M
 
 
-def _corruption_transition(A_vx: torch.Tensor, A_vv: torch.Tensor, dt: float) -> torch.Tensor:
+def _corruption_transition(A_vx: torch.Tensor, A_vv: torch.Tensor, dt: float, time_scale=1.0) -> torch.Tensor:
     N = A_vx.shape[0]
     I = torch.eye(N)
     M = torch.zeros(2 * N, 2 * N)
-    M[:N, :N] = I - dt**2 * A_vx
-    M[:N, N:] = dt * (I - dt * A_vv)
+    M[:N, :N] = I - time_scale * dt**2 * A_vx
+    M[:N, N:] = time_scale * dt * (I - dt * A_vv)
     M[N:, :N] = -dt * A_vx
     M[N:, N:] = I - dt * A_vv
     return M
@@ -112,12 +112,15 @@ def _corruption_transition(A_vx: torch.Tensor, A_vv: torch.Tensor, dt: float) ->
 def corruption_spectral_radius(
     N: int, coupling, gamma, alpha, beta, k_reference: float, T: int, dt: float,
     constant_k: bool, scale_damping_with_time: bool, time_scale_fn=None,
+    scale_kinematics_with_time: bool = True,
 ) -> Dict[str, float]:
     max_radius = 0.0
     n_unstable_steps = 0
     for t in range(1, T + 1):
         A_vx, A_vv = _extract_Avx_Avv(N, coupling, gamma, alpha, beta, k_reference, t, T, constant_k, scale_damping_with_time, time_scale_fn)
-        M = _corruption_transition(A_vx, A_vv, dt)
+        time_scale = _time_scale(torch.tensor(float(t)), T, time_scale_fn)
+        kin_scale = time_scale if scale_kinematics_with_time else 1.0
+        M = _corruption_transition(A_vx, A_vv, dt, time_scale=kin_scale)
         radius = torch.linalg.eigvals(M).abs().max().item()
         max_radius = max(max_radius, radius)
         if radius > 1.0 + 1e-9:
@@ -125,11 +128,11 @@ def corruption_spectral_radius(
     return {"corrupt_max_spectral_radius": max_radius, "corrupt_n_unstable_steps": n_unstable_steps}
 
 
-def _noise_injection(G: torch.Tensor, dt: float) -> torch.Tensor:
+def _noise_injection(G: torch.Tensor, dt: float, time_scale=1.0) -> torch.Tensor:
     N = G.shape[0]
     sqrt_dt = dt**0.5
     Nmat = torch.zeros(2 * N, N)
-    Nmat[:N, :] = dt * sqrt_dt * G
+    Nmat[:N, :] = time_scale * dt * sqrt_dt * G
     Nmat[N:, :] = sqrt_dt * G
     return Nmat
 
@@ -137,13 +140,16 @@ def _noise_injection(G: torch.Tensor, dt: float) -> torch.Tensor:
 def exact_corruption_covariance(
     N: int, coupling, gamma, alpha, beta, k_reference: float, T: int, dt: float, G,
     cov0: torch.Tensor, constant_k: bool = False, scale_damping_with_time: bool = True,
-    time_scale_fn=None,
+    time_scale_fn=None, scale_kinematics_with_time: bool = True, scale_diffusion_with_time: bool = True,
 ) -> torch.Tensor:
     Sigma = cov0.clone()
     for t in range(1, T + 1):
         A_vx, A_vv = _extract_Avx_Avv(N, coupling, gamma, alpha, beta, k_reference, t, T, constant_k, scale_damping_with_time, time_scale_fn)
-        M = _corruption_transition(A_vx, A_vv, dt)
-        Nmat = _noise_injection(G, dt)
+        time_scale = _time_scale(torch.tensor(float(t)), T, time_scale_fn)
+        kin_scale = time_scale if scale_kinematics_with_time else 1.0
+        G_t = G * time_scale.clamp_min(0).sqrt() if scale_diffusion_with_time else G
+        M = _corruption_transition(A_vx, A_vv, dt, time_scale=kin_scale)
+        Nmat = _noise_injection(G_t, dt, time_scale=kin_scale)
         Sigma = M @ Sigma @ M.T + Nmat @ Nmat.T
     return Sigma
 
@@ -152,6 +158,7 @@ def corruption_snr_timeseries(
     N: int, coupling, gamma, alpha, beta, k_reference: float, T: int, dt: float, G,
     constant_k: bool, scale_damping_with_time: bool, time_scale_fn=None,
     signal_cov0_x: float = 1.0, G_fn=None,
+    scale_kinematics_with_time: bool = True, scale_diffusion_with_time: bool = True,
 ) -> List[Dict[str, float]]:
     Signal = torch.zeros(2 * N, 2 * N)
     Signal[:N, :N] = signal_cov0_x * torch.eye(N)
@@ -160,9 +167,13 @@ def corruption_snr_timeseries(
     rows = []
     for t in range(1, T + 1):
         A_vx, A_vv = _extract_Avx_Avv(N, coupling, gamma, alpha, beta, k_reference, t, T, constant_k, scale_damping_with_time, time_scale_fn)
-        M = _corruption_transition(A_vx, A_vv, dt)
+        time_scale = _time_scale(torch.tensor(float(t)), T, time_scale_fn)
+        kin_scale = time_scale if scale_kinematics_with_time else 1.0
+        M = _corruption_transition(A_vx, A_vv, dt, time_scale=kin_scale)
         G_t = G_fn(t, T) if G_fn is not None else G
-        Nmat = _noise_injection(G_t, dt)
+        if scale_diffusion_with_time:
+            G_t = G_t * time_scale.clamp_min(0).sqrt()
+        Nmat = _noise_injection(G_t, dt, time_scale=kin_scale)
         Q = Nmat @ Nmat.T
 
         Signal = M @ Signal @ M.T
@@ -170,7 +181,7 @@ def corruption_snr_timeseries(
 
         t_tensor = torch.tensor(float(t))
         ts_val = time_scale_fn(t_tensor, T).item() if time_scale_fn is not None else ((T - t) / (t + T))
-        sigma_val = float(G_t.diagonal().mean().item()) if G_fn is not None else float(G.diagonal().mean().item())
+        sigma_val = float(G_t.diagonal().mean().item())
 
         sig_x = Signal[:N, :N].diagonal().mean().item()
         noise_x = Noise[:N, :N].diagonal().mean().item()
@@ -189,12 +200,16 @@ def corruption_snr_timeseries(
 def propagate_exact(
     N: int, coupling, gamma, alpha, beta, k_reference: float, T: int, dt: float, G,
     constant_k: bool, scale_damping_with_time: bool, prior_std: float = 1.0,
+    scale_kinematics_with_time: bool = True, scale_diffusion_with_time: bool = True,
 ) -> Dict[str, float]:
     Sigma = prior_std**2 * torch.eye(2 * N)
     for t in reversed(range(1, T + 1)):
         A_vx, A_vv = _extract_Avx_Avv(N, coupling, gamma, alpha, beta, k_reference, t, T, constant_k, scale_damping_with_time)
-        M = _generative_transition(A_vx, A_vv, dt)
-        Nmat = _noise_injection(G, dt)
+        time_scale = _time_scale(torch.tensor(float(t)), T, None)
+        kin_scale = time_scale if scale_kinematics_with_time else 1.0
+        G_t = G * time_scale.clamp_min(0).sqrt() if scale_diffusion_with_time else G
+        M = _generative_transition(A_vx, A_vv, dt, time_scale=kin_scale)
+        Nmat = _noise_injection(G_t, dt, time_scale=kin_scale)
         Sigma = M @ Sigma @ M.T + Nmat @ Nmat.T
 
     x_cov = Sigma[:N, :N]

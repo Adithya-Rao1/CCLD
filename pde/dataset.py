@@ -72,20 +72,14 @@ PROBLEM_SPECS = {
         ],
     },
     "Elder": {
-        # Elder is routed through _init_elder / _get_elder (its own 10-step rollout code path,
-        # not the standard PROBLEM_SPECS-driven input/outputs loader), so this entry only carries
-        # descriptive metadata for the README's system table -- it has no "input"/"outputs" keys.
         "full_name": "Mass-Transport-Fluid",
         "coupling": "bidirectional",
     },
 }
 
-# diffusion_reaction (PDEBench) isn't in PROBLEM_SPECS -- it's handled by a separate loading path
-# (_init_diffusion_reaction / _get_diffusion_reaction), not the PROBLEM_SPECS-driven directory
-# matcher. This carries the same descriptive metadata (full_name, coupling) for the README table.
 DIFFUSION_REACTION_METADATA = {
     "full_name": "Diffusion-Reaction (PDEBench)",
-    "coupling": "bidirectional",  # activator/inhibitor fields are mutually coupled
+    "coupling": "bidirectional", 
 }
 
 ELDER_ROLLOUT_FIELDS = ["u_u", "u_v", "c_flow"]
@@ -170,6 +164,98 @@ def _list_sample_indices(field_dir: str, is_dir_per_sample: bool = False) -> Lis
     return sorted(idxs)
 
 
+def _standard_split_sample_indices(problem_root: str, spec: Dict) -> List[int]:
+    try:
+        input_dirs = [_find_field_dir(problem_root, f["candidates"]) for f in spec["input"]]
+        output_dirs = [_find_field_dir(problem_root, f["candidates"]) for f in spec["outputs"]]
+    except FileNotFoundError:
+        return []
+    try:
+        idxs = set(_list_sample_indices(output_dirs[0]))
+        for d in input_dirs + output_dirs[1:]:
+            idxs &= set(_list_sample_indices(d))
+    except FileNotFoundError:
+        return []
+    return sorted(idxs)
+
+
+def _testing_split_broken(root_dir: str, problem: str) -> bool:
+    testing_root = os.path.join(root_dir, "testing", problem)
+    if not os.path.isdir(testing_root):
+        return False
+    spec = PROBLEM_SPECS[problem]
+    return not _standard_split_sample_indices(testing_root, spec)
+
+
+_HELD_OUT_SPLIT_DIR = os.path.join(os.path.dirname(__file__), "held_out_splits")
+
+
+def _held_out_split_path(problem: str) -> str:
+    return os.path.join(_HELD_OUT_SPLIT_DIR, f"{problem}_held_out_split.pt")
+
+
+def _get_or_create_held_out_split(problem_root: str, spec: Dict, problem: str) -> Dict:
+    path = _held_out_split_path(problem)
+    if os.path.isfile(path):
+        cached = torch.load(path)
+        if cached.get("source_problem_root") == problem_root:
+            return cached
+    idxs = _standard_split_sample_indices(problem_root, spec)
+    if not idxs:
+        raise FileNotFoundError(f"No usable samples found under {problem_root} to build a held-out split from")
+    n_total = len(idxs)
+    n_train = int(round(n_total * 0.9))
+    if n_total >= 2:
+        n_train = min(max(n_train, 1), n_total - 1)
+    else:
+        n_train = n_total
+    split = {"train": idxs[:n_train], "test": idxs[n_train:], "source_problem_root": problem_root, "n_total": n_total}
+    if not os.path.isfile(path):
+        os.makedirs(_HELD_OUT_SPLIT_DIR, exist_ok=True)
+        torch.save(split, path)
+    return split
+
+
+_TARGET_NORM_STATS_DIR = os.path.join(os.path.dirname(__file__), "target_norm_stats")
+
+
+def _target_norm_stats_path(problem: str) -> str:
+    return os.path.join(_TARGET_NORM_STATS_DIR, f"{problem}_target_norm_stats.pt")
+
+
+def compute_target_norm_stats(dataset, task_names: List[str]) -> Dict[str, Dict[str, float]]:
+    sums = {name: 0.0 for name in task_names}
+    sumsqs = {name: 0.0 for name in task_names}
+    counts = {name: 0 for name in task_names}
+    for i in range(len(dataset)):
+        sample = dataset[i]
+        for name, field in zip(sample["task_names"], sample["tasks"]):
+            arr = field.double()
+            sums[name] += arr.sum().item()
+            sumsqs[name] += (arr ** 2).sum().item()
+            counts[name] += arr.numel()
+    stats = {}
+    for name in task_names:
+        mean = sums[name] / counts[name]
+        var = max(sumsqs[name] / counts[name] - mean ** 2, 1e-12)
+        stats[name] = {"mean": mean, "std": max(var ** 0.5, 1e-6)}
+    return stats
+
+
+def _get_or_create_target_norm_stats(dataset, problem: str, task_names: List[str]) -> Dict[str, Dict[str, float]]:
+    path = _target_norm_stats_path(problem)
+    key = {"task_names": sorted(task_names), "n_samples": len(dataset)}
+    if os.path.isfile(path):
+        cached = torch.load(path)
+        if cached.get("_key") == key:
+            return cached["stats"]
+    stats = compute_target_norm_stats(dataset, task_names)
+    if not os.path.isfile(path):
+        os.makedirs(_TARGET_NORM_STATS_DIR, exist_ok=True)
+        torch.save({"_key": key, "stats": stats}, path)
+    return stats
+
+
 def _find_h5_file(root_dir: str) -> str:
     candidates = sorted(glob.glob(os.path.join(root_dir, "**", "*diff-react*.h5"), recursive=True))
     if not candidates:
@@ -240,10 +326,6 @@ class MultiPhysicsFieldDataset(Dataset):
         self._pde_array = _load_pdebench_diffusion_reaction(self.root_dir)  # (N,T,X,Y,C)
         n_samples_total, n_t = self._pde_array.shape[0], self._pde_array.shape[1]
 
-        # Deterministic 90/10 split by sample index so train/val are disjoint (PDEBench ships a
-        # single monolithic file with no native train/test split). First 90% of indices ->
-        # training, last 10% -> testing/val. With >=2 samples, always leave at least one sample
-        # on each side.
         split_key = str(self.split).lower()
         train_keys = {"training", "train"}
         test_keys = {"testing", "test", "val", "validation"}
@@ -294,7 +376,16 @@ class MultiPhysicsFieldDataset(Dataset):
 
     def _init_standard(self, n_tasks, task_subset):
         spec = PROBLEM_SPECS[self.problem]
-        problem_root = os.path.join(self.root_dir, self.split, self.problem)
+        split_key = str(self.split).lower()
+        train_keys = {"training", "train"}
+        test_keys = {"testing", "test", "val", "validation"}
+        self._use_held_out_split = (
+            split_key in (train_keys | test_keys) and _testing_split_broken(self.root_dir, self.problem)
+        )
+        if self._use_held_out_split:
+            problem_root = os.path.join(self.root_dir, "training", self.problem)
+        else:
+            problem_root = os.path.join(self.root_dir, self.split, self.problem)
         self._input_dirs = [(_find_field_dir(problem_root, f["candidates"]), f["ext"]) for f in spec["input"]]
 
         resolved_outputs = []
@@ -327,10 +418,21 @@ class MultiPhysicsFieldDataset(Dataset):
             raise ValueError(f"task_subset {unknown} not among native labels {native_labels} for {self.problem}")
         self.task_names = labels
 
-        idxs = _list_sample_indices(resolved_outputs[0]["dir"])
+        if self._use_held_out_split:
+            held_out = _get_or_create_held_out_split(problem_root, spec, self.problem)
+            idxs = held_out["train"] if split_key in train_keys else held_out["test"]
+        else:
+            idxs = _standard_split_sample_indices(problem_root, spec)
+            if not idxs:
+                checked = [d for d, _ in self._input_dirs] + [f["dir"] for f in resolved_outputs]
+                raise FileNotFoundError(
+                    f"No sample indices are present in ALL of {self.problem}'s field directories "
+                    f"under {problem_root} ({self.split} split). Checked: {checked}"
+                )
         if self.max_samples is not None:
             idxs = idxs[: self.max_samples]
         self._sample_indices = idxs
+        self._elliptic_dir = os.path.join(problem_root, "ellipticcsv") if self.problem == "TE_heat" else None
 
     def __len__(self) -> int:
         return len(self._sample_indices)
@@ -363,7 +465,11 @@ class MultiPhysicsFieldDataset(Dataset):
                 by_label[f["label"]] = _to_chw_tensor(arr, self.image_size)
 
         tasks = [by_label[name] for name in self.task_names]
-        return {"conditioning": conditioning, "tasks": tasks, "task_names": self.task_names}
+        sample = {"conditioning": conditioning, "tasks": tasks, "task_names": self.task_names}
+        if self._elliptic_dir is not None:
+            arr = _load_csv_field(os.path.join(self._elliptic_dir, f"{idx}.csv"))
+            sample["elliptic_params"] = torch.as_tensor(arr, dtype=torch.float32).reshape(-1)[:3]
+        return sample
 
     def _get_elder(self, i: int) -> Dict:
         idx = self._sample_indices[i]
@@ -408,4 +514,7 @@ def collate_fn(batch: List[Dict]) -> Dict:
     conditioning = torch.stack([b["conditioning"] for b in batch], dim=0)
     n_tasks = len(batch[0]["tasks"])
     tasks = [torch.stack([b["tasks"][i] for b in batch], dim=0) for i in range(n_tasks)]
-    return {"conditioning": conditioning, "tasks": tasks, "task_names": batch[0]["task_names"]}
+    out = {"conditioning": conditioning, "tasks": tasks, "task_names": batch[0]["task_names"]}
+    if "elliptic_params" in batch[0]:
+        out["elliptic_params"] = torch.stack([b["elliptic_params"] for b in batch], dim=0)
+    return out

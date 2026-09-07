@@ -7,7 +7,7 @@ import torch
 
 from core.coupling import build_coupling_matrix
 from core.damping import _DEFAULT_TARGET_ZETA, DampingRegime
-from core.drift import _broadcast_per_sample, _mean_frob_norm, _mean_per_sample
+from core.drift import _broadcast_per_sample, _mean_frob_norm, _mean_per_sample, _time_scale
 
 def mode_frequencies_sq(alpha: float, beta: float, k_self_reference: float, k_global_reference: float, N: int) -> Tuple[float, Optional[float]]:
     Omega_sq = k_self_reference + k_global_reference
@@ -33,6 +33,27 @@ def calibrate_coupled_gammas(
     return gamma_self, gamma_couple
 
 
+def antisymmetric_mode_damping(gamma_self: float, gamma_couple: float, N: int) -> float:
+    if N < 2:
+        raise ValueError("antisymmetric_mode_damping requires N >= 2 (no antisymmetric mode at N=1)")
+    return gamma_self + gamma_couple * N / (N - 1)
+
+
+def calibrate_sigma_fdt(gamma_self: float, target_variance: float = 1.0) -> float:
+    return math.sqrt(2.0 * gamma_self * target_variance)
+
+
+def calibrate_sigma_fdt_coupled(gamma_self: float, gamma_couple: float, N: int, target_variance: float = 1.0) -> Tuple[float, float]:
+    g_sym = calibrate_sigma_fdt(gamma_self, target_variance)
+    if N < 2:
+        return g_sym, 0.0
+    gamma_anti = antisymmetric_mode_damping(gamma_self, gamma_couple, N)
+    g_anti = calibrate_sigma_fdt(gamma_anti, target_variance)
+    b = (N - 1) / N * (g_sym - g_anti)
+    a = (g_sym + (N - 1) * g_anti) / N
+    return a, b
+
+
 def drift_fn_coupled_gamma(
     X: List[List[torch.Tensor]],
     V: List[List[torch.Tensor]],
@@ -48,6 +69,7 @@ def drift_fn_coupled_gamma(
     constant_k: bool = False,
     scale_damping_with_time: bool = True,
     time_scale_fn: Optional[Callable[[torch.Tensor, int], torch.Tensor]] = None,
+    k_global_reference: float = 1.0,
 ) -> List[List[torch.Tensor]]:
     N = len(X)
     if N < 1:
@@ -55,12 +77,12 @@ def drift_fn_coupled_gamma(
     if not (len(V) == len(K_self) == len(alpha) == len(beta) == N):
         raise ValueError("X, V, K_self, alpha, beta must all have length N")
 
-    time_scale = time_scale_fn(t, T) if time_scale_fn is not None else (T - t) / (t + T)
+    time_scale = _time_scale(t, T, time_scale_fn)
     norm_f_k_self = [_mean_frob_norm(K_self[i]) for i in range(N)]
     if not constant_k:
         norm_f_k_global = time_scale * _mean_frob_norm(K_global)
     else:
-        norm_f_k_global = torch.as_tensor(1.0, device=X[0][0].device)
+        norm_f_k_global = torch.as_tensor(k_global_reference, device=X[0][0].device)
     omega_sq = [-(norm_f_k_self[i] + norm_f_k_global) for i in range(N)]
 
     if N == 1:
