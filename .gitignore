@@ -14,3 +14,5 @@ results/
 *.csv
 *.json
 *.mat
+*.sty
+*.bib
