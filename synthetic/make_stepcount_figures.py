@@ -13,10 +13,10 @@ SUMMARY_CSV = os.path.join(HERE, "..", "stepcount_sweep_summary (2).csv")
 OUT_DIR = os.path.join(HERE, "figures")
 os.makedirs(OUT_DIR, exist_ok=True)
 
-METHODS = ["ddpm", "sdm", "csho_analytic"]
-METHOD_LABELS = {"ddpm": "DDPM", "sdm": "SDM", "csho_analytic": "CSHO"}
-METHOD_COLORS = {"csho_analytic": "#2b7a78", "ddpm": "#c1440e", "sdm": "#5b5f97"}
-METHOD_MARKERS = {"csho_analytic": "o", "ddpm": "s", "sdm": "^"}
+METHODS = ["ddpm", "sdm", "ccld_analytic"]
+METHOD_LABELS = {"ddpm": "DDPM", "sdm": "SDM", "ccld_analytic": "CCLD"}
+METHOD_COLORS = {"ccld_analytic": "#2b7a78", "ddpm": "#c1440e", "sdm": "#5b5f97"}
+METHOD_MARKERS = {"ccld_analytic": "o", "ddpm": "s", "sdm": "^"}
 N_VALUES = [2, 3, 4, 5]
 STEP_VALUES = [8, 16, 32, 64, 128]
 
@@ -66,7 +66,7 @@ def plot_kl(N: int) -> str:
 
 def plot_corr_pct(N: int) -> str:
     fig, ax = plt.subplots(figsize=(3.2, 2.6))
-    corr_true = data[(N, "csho_analytic")][STEP_VALUES[0]]["corr_true"]
+    corr_true = data[(N, "ccld_analytic")][STEP_VALUES[0]]["corr_true"]
     for method in METHODS:
         xs = STEP_VALUES
         ys = [data[(N, method)][s]["corr_pct_of_true"] for s in xs]
