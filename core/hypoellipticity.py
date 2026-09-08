@@ -60,6 +60,82 @@ def linearize_drift(
     return A.detach().cpu().numpy(), n
 
 
+def linearize_coupled_gamma_drift(
+    N: int,
+    K_self: List[List[torch.Tensor]],
+    K_global: List[torch.Tensor],
+    t: torch.Tensor,
+    T: int,
+    alpha: List[float],
+    beta: List[float],
+    coupling_matrix: Optional[torch.Tensor],
+    constant_k: bool,
+    gamma_self: Optional[float] = None,
+    gamma_couple: Optional[float] = None,
+    damping_matrix: Optional[torch.Tensor] = None,
+    shape: Tuple[int, ...] = (2, 2),
+    scale_damping_with_time: bool = True,
+    time_scale_fn: Optional[Callable[[torch.Tensor, int], torch.Tensor]] = None,
+    scale_kinematics_with_time: bool = True,
+) -> Tuple[np.ndarray, int]:
+    from synthetic.drift_coupled_gamma import drift_fn_coupled_gamma
+
+    n = int(torch.zeros(shape).numel())
+    time_scale = _time_scale(t, T, time_scale_fn)
+    kin_scale = time_scale if scale_kinematics_with_time else torch.as_tensor(1.0)
+
+    def f(z: torch.Tensor) -> torch.Tensor:
+        X, V = _unflatten_state(z, N, shape, n)
+        dV = drift_fn_coupled_gamma(
+            X, V, K_self, K_global, t, T, alpha, beta, gamma_self, gamma_couple,
+            coupling_matrix=coupling_matrix, constant_k=constant_k,
+            scale_damping_with_time=scale_damping_with_time, time_scale_fn=time_scale_fn,
+            damping_matrix=damping_matrix,
+        )
+        dX = [kin_scale * V[i][0].reshape(-1) for i in range(N)]
+        dV_flat = [dV[i][0].reshape(-1) for i in range(N)]
+        return torch.cat(dX + dV_flat)
+
+    z0 = torch.zeros(2 * N * n)
+    A = torch.autograd.functional.jacobian(f, z0)
+    return A.detach().cpu().numpy(), n
+
+
+def hypoellipticity_check_coupled_gamma(
+    N: int,
+    K_self: List[List[torch.Tensor]],
+    K_global: List[torch.Tensor],
+    t: torch.Tensor,
+    T: int,
+    alpha: List[float],
+    beta: List[float],
+    coupling_matrix: Optional[torch.Tensor],
+    constant_k: bool,
+    G: torch.Tensor,
+    gamma_self: Optional[float] = None,
+    gamma_couple: Optional[float] = None,
+    damping_matrix: Optional[torch.Tensor] = None,
+    shape: Tuple[int, ...] = (2, 2),
+    tol: float = 1e-8,
+    scale_damping_with_time: bool = True,
+    time_scale_fn: Optional[Callable[[torch.Tensor, int], torch.Tensor]] = None,
+    scale_kinematics_with_time: bool = True,
+    scale_diffusion_with_time: bool = True,
+) -> Dict:
+    A, n = linearize_coupled_gamma_drift(
+        N, K_self, K_global, t, T, alpha, beta, coupling_matrix, constant_k,
+        gamma_self=gamma_self, gamma_couple=gamma_couple, damping_matrix=damping_matrix, shape=shape,
+        scale_damping_with_time=scale_damping_with_time, time_scale_fn=time_scale_fn,
+        scale_kinematics_with_time=scale_kinematics_with_time,
+    )
+    if scale_diffusion_with_time:
+        time_scale = _time_scale(t, T, time_scale_fn)
+        G = G * time_scale.clamp_min(0).sqrt()
+    B = build_B_matrix(G, N, n)
+    passed, min_eig, eigvals = controllability_check(A, B, tol)
+    return {"passed": passed, "min_eig": min_eig, "eigvals": eigvals, "A": A, "B": B, "N": N, "n": n}
+
+
 def build_B_matrix(G: torch.Tensor, N: int, n: int) -> np.ndarray:
     top = np.zeros((N * n, N * n))
     bottom = np.kron(G.detach().cpu().numpy(), np.eye(n))
