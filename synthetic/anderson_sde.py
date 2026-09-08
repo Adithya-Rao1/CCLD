@@ -18,8 +18,8 @@ def anderson_em_step_coupled_gamma(
     T: int,
     alpha: List[float],
     beta: List[float],
-    gamma_self: float,
-    gamma_couple: float,
+    gamma_self: Optional[float],
+    gamma_couple: Optional[float],
     coupling_matrix_drift: Optional[torch.Tensor],
     constant_k: bool,
     dt: float,
@@ -30,13 +30,14 @@ def anderson_em_step_coupled_gamma(
     scale_kinematics_with_time: bool = True,
     scale_diffusion_with_time: bool = True,
     k_global_reference: float = 1.0,
+    damping_matrix: Optional[torch.Tensor] = None,
 ):
     N = len(X)
     dV = drift_fn_coupled_gamma(
         X, V, K_self, K_global, t, T, alpha, beta, gamma_self, gamma_couple,
         coupling_matrix=coupling_matrix_drift, constant_k=constant_k,
         scale_damping_with_time=scale_damping_with_time, time_scale_fn=time_scale_fn,
-        k_global_reference=k_global_reference,
+        k_global_reference=k_global_reference, damping_matrix=damping_matrix,
     )
     time_scale = _time_scale(t, T, time_scale_fn)
     kin_scale = time_scale if scale_kinematics_with_time else 1.0
@@ -77,8 +78,8 @@ def anderson_reverse_step_coupled_gamma(
     T: int,
     alpha: List[float],
     beta: List[float],
-    gamma_self: float,
-    gamma_couple: float,
+    gamma_self: Optional[float],
+    gamma_couple: Optional[float],
     coupling_matrix_drift: Optional[torch.Tensor],
     constant_k: bool,
     dt: float,
@@ -90,6 +91,7 @@ def anderson_reverse_step_coupled_gamma(
     scale_kinematics_with_time: bool = True,
     scale_diffusion_with_time: bool = True,
     k_global_reference: float = 1.0,
+    damping_matrix: Optional[torch.Tensor] = None,
 ):
     N = len(X)
     t_tensor = torch.as_tensor(t, device=X[0][0].device, dtype=X[0][0].dtype)
@@ -97,7 +99,7 @@ def anderson_reverse_step_coupled_gamma(
         X, V, K_self, K_global, t_tensor, T, alpha, beta, gamma_self, gamma_couple,
         coupling_matrix=coupling_matrix_drift, constant_k=constant_k,
         scale_damping_with_time=scale_damping_with_time, time_scale_fn=time_scale_fn,
-        k_global_reference=k_global_reference,
+        k_global_reference=k_global_reference, damping_matrix=damping_matrix,
     )
     time_scale = _time_scale(t_tensor, T, time_scale_fn)
     kin_scale = time_scale if scale_kinematics_with_time else 1.0
