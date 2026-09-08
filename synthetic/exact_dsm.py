@@ -21,8 +21,9 @@ def elapsed_time_at_step(t_idx: int, T: int, dt: float, time_scale_fn=None, scal
 
 
 def _extract_Avx_Avv_coupled_gamma(
-    N: int, gamma_self: float, gamma_couple: float, alpha: List[float], beta: List[float],
+    N: int, gamma_self: Optional[float], gamma_couple: Optional[float], alpha: List[float], beta: List[float],
     k_reference: float, coupling, t: float, T: int, constant_k: bool, time_scale_fn,
+    damping_matrix: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     device = coupling.device if coupling is not None else torch.device("cpu")
     K_self = [[torch.tensor([[k_reference]], device=device)] for _ in range(N)]
@@ -36,6 +37,7 @@ def _extract_Avx_Avv_coupled_gamma(
             X, V, K_self, K_global, t_tensor, T, alpha, beta, gamma_self, gamma_couple,
             coupling_matrix=coupling, constant_k=constant_k,
             scale_damping_with_time=True, time_scale_fn=time_scale_fn,
+            damping_matrix=damping_matrix,
         )
         return torch.tensor([dV[i][0].item() for i in range(N)], device=device)
 
@@ -165,16 +167,17 @@ def calibrate_sigma_for_leak(
 
 
 def precompute_transition_params(
-    N: int, gamma_self: float, gamma_couple: float, alpha: List[float], beta: List[float],
+    N: int, gamma_self: Optional[float], gamma_couple: Optional[float], alpha: List[float], beta: List[float],
     k_reference: float, coupling, T: int, dt: float, g_fn, constant_k: bool, time_scale_fn,
     scale_kinematics_with_time: bool = True, scale_diffusion_with_time: bool = True,
+    damping_matrix: Optional[torch.Tensor] = None,
 ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
     device = coupling.device if coupling is not None else torch.device("cpu")
     Phi = torch.eye(2 * N, device=device)
     Sigma = torch.zeros(2 * N, 2 * N, device=device)
     params = []
     for t in range(1, T + 1):
-        A_vx, A_vv = _extract_Avx_Avv_coupled_gamma(N, gamma_self, gamma_couple, alpha, beta, k_reference, coupling, t, T, constant_k, time_scale_fn)
+        A_vx, A_vv = _extract_Avx_Avv_coupled_gamma(N, gamma_self, gamma_couple, alpha, beta, k_reference, coupling, t, T, constant_k, time_scale_fn, damping_matrix=damping_matrix)
         time_scale = _time_scale(torch.as_tensor(float(t), device=device), T, time_scale_fn)
         kin_scale = time_scale if scale_kinematics_with_time else 1.0
         M = _forward_step_matrix(A_vx, A_vv, dt, time_scale=kin_scale)
@@ -294,6 +297,81 @@ def analytic_conditional_covariance_n(
     return Sigma
 
 
+def _mode_quantities_spectral(
+    Gamma: torch.Tensor, C: torch.Tensor, q: torch.Tensor, target_variance: float = 1.0, zeta: float = 1.0,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    N = C.shape[0]
+    device, dtype = C.device, C.dtype
+    L = torch.eye(N, device=device, dtype=dtype) - C
+    mu, U = torch.linalg.eigh(L)
+    gamma_modes = torch.diagonal(U.T @ Gamma @ U)
+    Omega_modes = gamma_modes / (2.0 * zeta)
+    g_modes = torch.sqrt((2.0 * gamma_modes * target_variance).clamp_min(0.0))
+    q_t = torch.as_tensor(q, dtype=dtype, device=device)
+    return q_t, Omega_modes, g_modes, U
+
+
+def analytic_score_precision_n_spectral(
+    Gamma: torch.Tensor, C: torch.Tensor, q: torch.Tensor, target_variance: float = 1.0,
+    x_threshold: float = 0.5, zeta: float = 1.0,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    N = C.shape[0]
+    q_t, Omega_modes, g_modes, U = _mode_quantities_spectral(Gamma, C, q, target_variance, zeta)
+    var_modes = torch.stack([_var_v_given_x_scalar(Omega_modes[k], g_modes[k], q_t, x_threshold) for k in range(N)])
+    coeff_modes = torch.stack([_regression_coeff_scalar(Omega_modes[k], g_modes[k], q_t, x_threshold) for k in range(N)])
+    prec_modes = 1.0 / var_modes.clamp_min(1e-30)
+    precision = U @ torch.diag(prec_modes) @ U.T
+    coeff = U @ torch.diag(coeff_modes) @ U.T
+    return precision, coeff
+
+
+def analytic_conditional_covariance_n_spectral(
+    Gamma: torch.Tensor, C: torch.Tensor, q: torch.Tensor, target_variance: float = 1.0,
+    x_threshold: float = 0.5, zeta: float = 1.0,
+) -> torch.Tensor:
+    N = C.shape[0]
+    device, dtype = C.device, C.dtype
+    q_t, Omega_modes, g_modes, U = _mode_quantities_spectral(Gamma, C, q, target_variance, zeta)
+    sxx_modes = torch.stack([_sxx_scalar(Omega_modes[k], g_modes[k], q_t, x_threshold) for k in range(N)])
+    sxv_modes = torch.stack([_sxv_scalar(Omega_modes[k], g_modes[k], q_t) for k in range(N)])
+    svv_modes = torch.stack([_svv_scalar(Omega_modes[k], g_modes[k], q_t) for k in range(N)])
+    Sxx = U @ torch.diag(sxx_modes) @ U.T
+    Sxv = U @ torch.diag(sxv_modes) @ U.T
+    Svv = U @ torch.diag(svv_modes) @ U.T
+
+    Sigma = torch.zeros(2 * N, 2 * N, dtype=dtype, device=device)
+    Sigma[:N, :N], Sigma[:N, N:], Sigma[N:, :N], Sigma[N:, N:] = Sxx, Sxv, Sxv.T, Svv
+    return Sigma
+
+
+def sample_and_analytic_score_target_spectral(
+    Z0: torch.Tensor, Phi_t: torch.Tensor, Gamma: torch.Tensor, C: torch.Tensor,
+    q: torch.Tensor, target_variance: float = 1.0, jitter: float = 1e-6, zeta: float = 1.0,
+):
+    N = C.shape[0]
+    B = Z0.shape[0]
+    device = Z0.device
+    mean = Z0 @ Phi_t.T
+    Sigma_t = analytic_conditional_covariance_n_spectral(Gamma, C, q, target_variance, zeta=zeta)
+    scale = Sigma_t.diagonal().abs().max().clamp_min(1.0)
+    Sigma_reg = Sigma_t + jitter * scale * torch.eye(2 * N, device=device)
+    L_chol = torch.linalg.cholesky(Sigma_reg)
+    eps = torch.randn(B, 2 * N, device=device)
+    Zt = mean + eps @ L_chol.T
+
+    reg_precision, regression_coeff = analytic_score_precision_n_spectral(
+        Gamma, C, q, target_variance, zeta=zeta,
+    )
+
+    diff_x = Zt[:, :N] - mean[:, :N]
+    diff_v = Zt[:, N:] - mean[:, N:]
+    E_V_given_X_dev = diff_x @ regression_coeff.T
+    resid = diff_v - E_V_given_X_dev
+
+    score_v_reg = -resid @ reg_precision.T
+    return Zt, score_v_reg
+
+
 def sample_and_analytic_score_target(
     Z0: torch.Tensor, Phi_t: torch.Tensor, N: int,
     gamma_self: float, gamma_couple: float, q: torch.Tensor, target_variance: float = 1.0, jitter: float = 1e-6,
@@ -330,10 +408,11 @@ def tau_hat_vp_linear_schedule(T: int, dt: float) -> float:
 
 
 def closed_form_propagator(
-    N: int, gamma_self: float, gamma_couple: float, alpha: List[float], beta: List[float],
+    N: int, gamma_self: Optional[float], gamma_couple: Optional[float], alpha: List[float], beta: List[float],
     k_reference: float, coupling: Optional[torch.Tensor], tau_hat: float,
     constant_k: bool = False, sigma_ref: float = 1.0, dtype=torch.float32,
     G0: Optional[torch.Tensor] = None,
+    damping_matrix: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     if not constant_k:
         raise ValueError(
@@ -343,6 +422,7 @@ def closed_form_propagator(
     A_vx0, A_vv0 = _extract_Avx_Avv_coupled_gamma(
         N, gamma_self, gamma_couple, alpha, beta, k_reference, coupling,
         t=1, T=1, constant_k=constant_k, time_scale_fn=const_one,
+        damping_matrix=damping_matrix,
     )
     A_vx0 = A_vx0.to(dtype)
     A_vv0 = A_vv0.to(dtype)
