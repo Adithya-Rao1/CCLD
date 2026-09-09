@@ -20,3 +20,6 @@ results/
 *.png
 *.bak
 tests/
+image/
+*.mat
+RESULTS.md
