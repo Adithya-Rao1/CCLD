@@ -167,6 +167,74 @@ def test_experiment_2_physics_smoke_te_heat():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _make_te_heat_fixture(tmp):
+    import scipy.io as sio
+
+    rng = np.random.default_rng(0)
+    problem_root = os.path.join(tmp, "training", "TE_heat")
+    mater_dir = os.path.join(problem_root, "mater")
+    os.makedirs(mater_dir, exist_ok=True)
+    T_dir = os.path.join(problem_root, "T")
+    os.makedirs(T_dir, exist_ok=True)
+    Ez_dir = os.path.join(problem_root, "Ez")
+    os.makedirs(Ez_dir, exist_ok=True)
+    elliptic_dir = os.path.join(problem_root, "ellipticcsv")
+    os.makedirs(elliptic_dir, exist_ok=True)
+    for sid in ["1", "2", "3", "4"]:
+        sio.savemat(os.path.join(mater_dir, f"{sid}.mat"), {"mater": rng.random((8, 8)) + 1.0})
+        sio.savemat(os.path.join(T_dir, f"{sid}.mat"), {"T": rng.random((8, 8)) * 50 + 300})
+        arr = rng.random((8, 8)) + 1j * rng.random((8, 8))
+        sio.savemat(os.path.join(Ez_dir, f"{sid}.mat"), {"Ez": arr})
+        np.savetxt(os.path.join(elliptic_dir, f"{sid}.csv"), np.array([[0.0, 0.0, 0.002]]), delimiter=",")
+
+
+def test_experiment_2_physics_smoke_te_heat_csho_pairwise_mean_field():
+    from pde.run_experiment import parse_args, train_one_seed
+
+    tmp = tempfile.mkdtemp(prefix="csho_smoke_exp2_teheat_pairwise_mf_")
+    try:
+        _make_te_heat_fixture(tmp)
+        argv = [
+            "--data-root", tmp, "--problem", "TE_heat", "--method", "csho_pairwise",
+            "--coupling-family", "mean_field", "--n-diff-steps", "2",
+            "--batch-size", "2", "--n-epochs", "1", "--seeds", "0", "--max-samples", "10", "--image-size", "8",
+            "--latent-dim", "8", "--backbone-channels", "16", "--base-channels", "8", "--n-downsample", "1",
+            "--score-blocks", "1", "--score-heads", "1", "--num-workers", "0", "--device", "cpu",
+            "--out-dir", os.path.join(tmp, "out"),
+        ]
+        args = parse_args(argv)
+        metrics = train_one_seed(args, seed=0)
+        assert all(np.isfinite(v) for v in metrics.values()), metrics
+        assert all(v < 5.0 for k, v in metrics.items() if k.endswith("_rel_l2")), metrics
+        assert "e_field_pde_residual" in metrics and "heat_pde_residual" in metrics, metrics
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_experiment_2_physics_smoke_te_heat_csho_pairwise_block():
+    from pde.run_experiment import parse_args, train_one_seed
+
+    tmp = tempfile.mkdtemp(prefix="csho_smoke_exp2_teheat_pairwise_block_")
+    try:
+        _make_te_heat_fixture(tmp)
+        argv = [
+            "--data-root", tmp, "--problem", "TE_heat", "--method", "csho_pairwise",
+            "--coupling-family", "block", "--coupling-block-sizes", "2,1",
+            "--coupling-w-in", "2.0", "--coupling-w-out", "1.0", "--n-diff-steps", "2",
+            "--batch-size", "2", "--n-epochs", "1", "--seeds", "0", "--max-samples", "10", "--image-size", "8",
+            "--latent-dim", "8", "--backbone-channels", "16", "--base-channels", "8", "--n-downsample", "1",
+            "--score-blocks", "1", "--score-heads", "1", "--num-workers", "0", "--device", "cpu",
+            "--out-dir", os.path.join(tmp, "out"),
+        ]
+        args = parse_args(argv)
+        metrics = train_one_seed(args, seed=0)
+        assert all(np.isfinite(v) for v in metrics.values()), metrics
+        assert all(v < 5.0 for k, v in metrics.items() if k.endswith("_rel_l2")), metrics
+        assert "e_field_pde_residual" in metrics and "heat_pde_residual" in metrics, metrics
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_experiment_2_physics_smoke_va():
     import scipy.io as sio
 
@@ -509,6 +577,10 @@ if __name__ == "__main__":
     print("OK: experiment_2_physics (E_flow, pde_residual) smoke test passed.")
     test_experiment_2_physics_smoke_te_heat()
     print("OK: experiment_2_physics (TE_heat, pde_residual) smoke test passed.")
+    test_experiment_2_physics_smoke_te_heat_csho_pairwise_mean_field()
+    print("OK: experiment_2_physics (TE_heat, csho_pairwise, mean_field) smoke test passed.")
+    test_experiment_2_physics_smoke_te_heat_csho_pairwise_block()
+    print("OK: experiment_2_physics (TE_heat, csho_pairwise, block) smoke test passed.")
     test_experiment_2_physics_smoke_va()
     print("OK: experiment_2_physics (VA, pde_residual) smoke test passed.")
     test_experiment_2_physics_smoke_e_flow_fno()

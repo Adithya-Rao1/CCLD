@@ -15,14 +15,21 @@ from core.baselines import (
     ddpm_forward_n, ddpm_reverse_step_n, make_ddpm_schedule, vp_alpha_bar, vp_beta_t, vp_sde_forward_marginal_n,
     vp_sde_reverse_step_n,
 )
-from core.coupling import build_coupling_matrix
+from core.coupling import block_coupling, build_coupling_matrix, random_heterogeneous_coupling
+from core.damping import _DEFAULT_TARGET_ZETA
 from core.diagnostics_bridge import attach_grad_hooks_generic, grad_norm_buckets, make_drift_detector
 from core.reporting import plot_bar_comparison, render_experiment_report, write_csv, write_json
 from core.sde import build_g_matrix_n
 from core.stats import aggregate_over_seeds
 from synthetic.anderson_sde import anderson_em_step_coupled_gamma, anderson_reverse_step_coupled_gamma
-from synthetic.drift_coupled_gamma import calibrate_coupled_gammas, calibrate_sigma_fdt, calibrate_sigma_fdt_coupled
-from synthetic.exact_dsm import elapsed_time_at_step, precompute_transition_params, sample_and_analytic_score_target
+from synthetic.drift_coupled_gamma import (
+    calibrate_coupled_gammas, calibrate_coupled_gammas_spectral, calibrate_sigma_fdt, calibrate_sigma_fdt_coupled,
+    calibrate_sigma_fdt_spectral,
+)
+from synthetic.exact_dsm import (
+    elapsed_time_at_step, precompute_transition_params, sample_and_analytic_score_target,
+    sample_and_analytic_score_target_spectral,
+)
 from pde.dataset import ALL_PROBLEMS, MultiPhysicsFieldDataset, collate_fn, _get_or_create_target_norm_stats
 from pde.pde_residuals import e_flow_residual, pde_residual_metric, te_heat_normalize_mater, te_heat_residual, va_residual
 
@@ -89,6 +96,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--damping-regime", default="critically_damped",
                     choices=["underdamped", "critically_damped", "overdamped"])
     p.add_argument("--target-zeta", type=float, default=None)
+    p.add_argument("--coupling-family", default="mean_field",
+                    choices=["mean_field", "block", "random_heterogeneous"],
+                    help="only used by --method csho_pairwise: how its coupling matrix C is built. "
+                         "'mean_field' reproduces plain csho's C (the default, so csho_pairwise is "
+                         "runnable out of the box); 'block'/'random_heterogeneous' need "
+                         "--coupling-block-sizes/--coupling-w-in/--coupling-w-out or "
+                         "--coupling-epsilon respectively")
+    p.add_argument("--coupling-block-sizes", default=None,
+                    help="comma-separated block sizes summing to the task count N, e.g. '2,1' for "
+                         "TE_heat's {Re Ez, Im Ez} vs {T} -- required when --coupling-family block")
+    p.add_argument("--coupling-w-in", type=float, default=2.0)
+    p.add_argument("--coupling-w-out", type=float, default=1.0)
+    p.add_argument("--coupling-epsilon", type=float, default=1.0)
     p.add_argument("--alpha", default="1.0")
     p.add_argument("--beta", default="0.5")
     p.add_argument("--k-reference", type=float, default=1.0,)
@@ -161,6 +181,12 @@ def parse_args(argv=None) -> argparse.Namespace:
 
     args.seeds = [int(s) for s in str(args.seeds).split(",") if s.strip() != ""]
     args.task_subset = [t.strip() for t in args.task_subset.split(",")] if args.task_subset else None
+    args.coupling_block_sizes = (
+        [int(s) for s in str(args.coupling_block_sizes).split(",") if s.strip() != ""]
+        if args.coupling_block_sizes else None
+    )
+    if args.method == "csho_pairwise" and args.coupling_family == "block" and args.coupling_block_sizes is None:
+        raise ValueError("--coupling-block-sizes is required when --coupling-family block")
     if args.dt is None:
         args.dt = 1.0 / args.n_diff_steps
     return args
@@ -173,27 +199,47 @@ def _csho_time_scale_fn(args):
     return None
 
 
-def build_method_state(args, N: int, device, sigma_ab=None):
+def _build_pde_coupling(args, method: str, N: int, device, seed: int) -> torch.Tensor:
+    if method == "csho_pairwise":
+        family = args.coupling_family
+        if family == "mean_field":
+            return build_coupling_matrix(N, mode="mean_field", device=device)
+        if family == "block":
+            return block_coupling(N, args.coupling_block_sizes, args.coupling_w_in, args.coupling_w_out,
+                                   device=device)
+        if family == "random_heterogeneous":
+            return random_heterogeneous_coupling(N, args.coupling_epsilon, seed, device=device)
+        raise ValueError(f"Unknown coupling_family {family!r}")
+    cfg = METHOD_CONFIGS[method]
+    return build_coupling_matrix(N, mode=cfg["coupling_mode"], device=device)
+
+
+def build_method_state(args, N: int, device, coupling=None, sigma_ab=None):
     if args.method in METHOD_CONFIGS:
         cfg = METHOD_CONFIGS[args.method]
-        coupling = build_coupling_matrix(N, mode=cfg["coupling_mode"], device=device)
-        a, b = sigma_ab
-        if args.method == "csho":
+        if coupling is None:
+            coupling = build_coupling_matrix(N, mode=cfg["coupling_mode"], device=device)
+        if args.method == "csho_pairwise":
             g_per_task = None
-            g_matrix = build_g_matrix_n(
-                torch.tensor(a, device=device), N, diffusion_mode="shared",
-                coupling_matrix=b * coupling,
-            )
+            g_matrix = sigma_ab
         else:
-            g_per_task = None
-            if cfg["diffusion_mode"] == "independent":
-                g_per_task = [a * (0.8 + 0.4 * i / max(N - 1, 1)) for i in range(N)]
-            g_matrix = build_g_matrix_n(
-                torch.tensor(a, device=device), N, diffusion_mode=cfg["diffusion_mode"],
-                g_per_task=g_per_task, coupling_matrix=coupling if cfg["diffusion_mode"] == "independent" else None,
-            )
+            a, b = sigma_ab
+            if args.method == "csho":
+                g_per_task = None
+                g_matrix = build_g_matrix_n(
+                    torch.tensor(a, device=device), N, diffusion_mode="shared",
+                    coupling_matrix=b * coupling,
+                )
+            else:
+                g_per_task = None
+                if cfg["diffusion_mode"] == "independent":
+                    g_per_task = [a * (0.8 + 0.4 * i / max(N - 1, 1)) for i in range(N)]
+                g_matrix = build_g_matrix_n(
+                    torch.tensor(a, device=device), N, diffusion_mode=cfg["diffusion_mode"],
+                    g_per_task=g_per_task, coupling_matrix=coupling if cfg["diffusion_mode"] == "independent" else None,
+                )
         return {"is_csho": True, "cfg": cfg, "coupling": coupling, "g_per_task": g_per_task,
-                "ddpm_sched": None, "sigma": a, "g_matrix": g_matrix}
+                "ddpm_sched": None, "sigma": sigma_ab, "g_matrix": g_matrix}
     if args.method == "ddpm":
         return {"is_csho": False, "cfg": None, "coupling": None, "g_per_task": None,
                 "ddpm_sched": make_ddpm_schedule(args.n_diff_steps, device=device)}
@@ -244,8 +290,9 @@ def _build_score_fns(args, score_net, conditioning):
     return make_score_fn(score_net, conditioning), make_flat_score_fn(score_net, conditioning)
 
 
-def _calibrate_csho_sigma(model, train_loader, N: int, gamma_self: float, gamma_couple: float,
-                           args: argparse.Namespace, device, task_names, is_spatial: bool) -> Tuple[float, float]:
+def _calibrate_csho_sigma(model, train_loader, N: int, gamma_self: Optional[float], gamma_couple: Optional[float],
+                           Gamma: Optional[torch.Tensor], coupling: Optional[torch.Tensor],
+                           args: argparse.Namespace, device, task_names, is_spatial: bool):
     batch = next(iter(train_loader))
     conditioning = batch["conditioning"].to(device)
     if "elliptic_params" in batch:
@@ -255,10 +302,12 @@ def _calibrate_csho_sigma(model, train_loader, N: int, gamma_self: float, gamma_
         X, _, _, _, _ = _encode_state(args, model, task_names, model_conditioning, is_spatial)
     X_flat = torch.cat([X[i][0].reshape(-1, 1) for i in range(N)], dim=-1).detach().cpu()
     cov_data = torch.cov(X_flat.T)
-    if args.method == "csho":
-        a, b = calibrate_sigma_fdt_coupled(gamma_self, gamma_couple, N)
+    if Gamma is not None:
+        sigma_state = calibrate_sigma_fdt_spectral(Gamma, coupling, target_variance=1.0)
+    elif args.method == "csho":
+        sigma_state = calibrate_sigma_fdt_coupled(gamma_self, gamma_couple, N)
     else:
-        a, b = calibrate_sigma_fdt(gamma_self), 0.0
+        sigma_state = (calibrate_sigma_fdt(gamma_self), 0.0)
     if args.debug_rollout:
         std = cov_data.diagonal().clamp_min(1e-12).sqrt()
         corr = cov_data / (std[:, None] * std[None, :])
@@ -266,8 +315,8 @@ def _calibrate_csho_sigma(model, train_loader, N: int, gamma_self: float, gamma_
         rho_true = off.sum().item() / (N * (N - 1))
         print(f"[debug-rollout] cov_data diag (per-task variance) = {dict(zip(task_names, std.pow(2).tolist()))}")
         print(f"[debug-rollout] cov_data mean pairwise corr (rho_true) = {rho_true:.6f}")
-        print(f"[debug-rollout] calibrated sigma (a, b) = ({a}, {b})")
-    return a, b
+        print(f"[debug-rollout] calibrated sigma = {sigma_state}")
+    return sigma_state
 
 
 def train_encoder_only(args: argparse.Namespace, seed: int) -> None:
@@ -421,22 +470,34 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
     else:
         optimizer = torch.optim.Adam(list(model.parameters()) + list(score_net.parameters()), lr=args.lr)
 
-    gamma_self, gamma_couple = calibrate_coupled_gammas(
-        args.alpha_list[0], args.beta_list[0], args.k_reference, args.k_reference, N,
-        regime=args.damping_regime, target_zeta=args.target_zeta,
-    )
-
     if is_csho:
-        sigma_ab = _calibrate_csho_sigma(model, train_loader, N, gamma_self, gamma_couple, args, device,
-                                          task_names, is_spatial)
-        state = build_method_state(args, N, device, sigma_ab=sigma_ab)
-        coupling = state["coupling"]
+        coupling = _build_pde_coupling(args, args.method, N, device, seed)
+        if args.method == "csho_pairwise":
+            Gamma = calibrate_coupled_gammas_spectral(
+                args.alpha_list[0], args.beta_list[0], args.k_reference, args.k_reference, coupling,
+                regime=args.damping_regime, target_zeta=args.target_zeta,
+            )
+            gamma_self, gamma_couple = None, None
+            zeta_resolved = args.target_zeta if args.target_zeta is not None else _DEFAULT_TARGET_ZETA[args.damping_regime]
+        else:
+            gamma_self, gamma_couple = calibrate_coupled_gammas(
+                args.alpha_list[0], args.beta_list[0], args.k_reference, args.k_reference, N,
+                regime=args.damping_regime, target_zeta=args.target_zeta,
+            )
+            Gamma = None
+            zeta_resolved = None
+
+        sigma_state = _calibrate_csho_sigma(model, train_loader, N, gamma_self, gamma_couple, Gamma, coupling,
+                                             args, device, task_names, is_spatial)
+        state = build_method_state(args, N, device, coupling=coupling, sigma_ab=sigma_state)
         g_matrix = state["g_matrix"]
         params = precompute_transition_params(
             N, gamma_self, gamma_couple, args.alpha_list, args.beta_list, args.k_reference, coupling,
             args.n_diff_steps, args.dt, lambda t, T: g_matrix, args.constant_k, _csho_time_scale_fn(args),
+            damping_matrix=Gamma,
         )
     else:
+        gamma_self = gamma_couple = Gamma = None
         state = build_method_state(args, N, device)
 
     drift_detector = make_drift_detector(bucket_names=[])
@@ -471,7 +532,12 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
             Z0 = torch.cat([X_flat, torch.zeros_like(X_flat)], dim=-1)
             Phi_t, _ = params[t_idx - 1]
             q = elapsed_time_at_step(t_idx, args.n_diff_steps, args.dt, _csho_time_scale_fn(args))
-            Zt, score_target = sample_and_analytic_score_target(Z0, Phi_t, N, gamma_self, gamma_couple, q)
+            if Gamma is not None:
+                Zt, score_target = sample_and_analytic_score_target_spectral(
+                    Z0, Phi_t, Gamma, coupling, q, zeta=zeta_resolved,
+                )
+            else:
+                Zt, score_target = sample_and_analytic_score_target(Z0, Phi_t, N, gamma_self, gamma_couple, q)
             X_t = [[Zt[:, i:i + 1].reshape(*orig_shape)] for i in range(N)]
             V_t = [[Zt[:, N + i:N + i + 1].reshape(*orig_shape)] for i in range(N)]
 
@@ -536,7 +602,7 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
         print(f"[debug-rollout] trained output_gain per task ({list(zip(task_names, gain))})")
 
     metrics, per_sample_rel_l2, sample_maps = evaluate(
-        args, model, score_net, val_loader, device, task_names, state, gamma_self, gamma_couple,
+        args, model, score_net, val_loader, device, task_names, state, gamma_self, gamma_couple, Gamma,
         is_spatial, target_mean, target_std,
     )
     metrics["nan_events"] = float(nan_events)
@@ -551,7 +617,7 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
 
 
 @torch.no_grad()
-def evaluate(args, model, score_net, val_loader, device, task_names, state, gamma_self, gamma_couple,
+def evaluate(args, model, score_net, val_loader, device, task_names, state, gamma_self, gamma_couple, Gamma=None,
              is_spatial: bool = False, target_mean=None, target_std=None,
              ) -> Tuple[Dict[str, float], Dict[str, List[float]], Dict[str, np.ndarray]]:
     model.eval()
@@ -592,6 +658,7 @@ def evaluate(args, model, score_net, val_loader, device, task_names, state, gamm
                     X_cur, V_cur, K_self, K_global, score_outputs, t_idx, args.n_diff_steps,
                     args.alpha_list, args.beta_list, gamma_self, gamma_couple,
                     coupling, args.constant_k, args.dt, G, time_scale_fn=_csho_time_scale_fn(args),
+                    damping_matrix=Gamma,
                 )
             final_latents = [X_cur[i][0] for i in range(N)]
         elif args.method == "ddpm":
