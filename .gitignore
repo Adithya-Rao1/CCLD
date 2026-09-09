@@ -16,3 +16,7 @@ results/
 *.mat
 *.sty
 *.bib
+*.pdf
+*.png
+*.bak
+tests/

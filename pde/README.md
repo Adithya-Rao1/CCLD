@@ -733,6 +733,63 @@ auto-derivation and dynamic calibration apply); `lambda_ndsm` was already a dead
 `lambda_tikhonov` once the Tikhonov-regularized score target was replaced by the analytic one) and
 is harmless but was not cleaned up.
 
+## 13. `csho_pairwise` fixed: crash + naive-affine calibration, smoke-verified on TE_heat only
+
+`csho_pairwise` was previously dead code -- `build_method_state` called
+`core.coupling.build_coupling_matrix(N, mode="pairwise", device=device)` with no `weights`, which
+`core/coupling.py` raises `ValueError` on; the method had zero test coverage and had apparently
+never been run. Separately, even once fixed, `pde/` never adopted the `synthetic/` pairwise-
+coupling session's spectral generalization (`calibrate_coupled_gammas_spectral`/
+`calibrate_sigma_fdt_spectral`/`sample_and_analytic_score_target_spectral`) -- it only had the
+naive affine calibration (`calibrate_coupled_gammas`/`calibrate_sigma_fdt_coupled`), which is
+exact only at mean-field's degenerate eigenspectrum and silently mis-damps every mode `k>=3` for
+any other coupling matrix (the same gap `tests/test_pairwise_spectral_coupling.py` already proves
+on `synthetic/`).
+
+**Fix** (`pde/run_experiment.py`, scoped entirely to `--method csho_pairwise` -- every other
+method's code path and numerics are byte-for-byte unchanged): new
+`--coupling-family {mean_field,block,random_heterogeneous}` (default `mean_field`, so
+`csho_pairwise` is runnable out of the box and reduces exactly to plain `csho`) plus
+`--coupling-block-sizes`/`--coupling-w-in`/`--coupling-w-out`/`--coupling-epsilon`. When the
+family isn't `mean_field`, damping (`calibrate_coupled_gammas_spectral`), diffusion
+(`calibrate_sigma_fdt_spectral`), and the DSM score target
+(`sample_and_analytic_score_target_spectral`) all switch to the spectral (matrix) path instead of
+the scalar `(gamma_self, gamma_couple)` one; `precompute_transition_params` and
+`anderson_reverse_step_coupled_gamma` already accepted an optional `damping_matrix` from the
+`synthetic/` session, so no changes were needed there.
+
+**Verified end-to-end, not just unit-level**: with `--coupling-family mean_field`, the calibrated
+`(N,N)` diffusion matrix from the spectral path matches the scalar path's `a*I + b*C` exactly
+(confirmed via `--debug-rollout` on the TE_heat smoke fixture: scalar path gives
+`(a,b)=(2.5098,-0.1314)`; spectral path gives a matrix with `diag=2.5098`, `off-diag=-0.0657=b/2`
+-- exactly consistent since mean-field's off-diagonal is `1/(N-1)=0.5`).
+
+**Important limitation, found while validating: TE_heat (N=3) cannot demonstrate any effect from
+coupling family at all.** A symmetric doubly-stochastic zero-diagonal matrix is *uniquely*
+mean-field for `N<=3` (3 unknowns, 3 independent row-sum/symmetry constraints -- no free
+parameter survives), a fact already noted in `CLAUDE.md`'s pairwise-coupling session notes but
+not fully internalized before choosing TE_heat as the validation target here. Confirmed directly:
+`block_coupling`/`random_heterogeneous_coupling` at `N=3` return the exact mean-field matrix
+(`max_abs_diff` at float-noise level, `~1e-7`) regardless of `w_in`/`w_out`/`epsilon`, even at
+extreme ratios (tested up to 50:1). Also tried and ruled out: a "blow-up" construction (duplicate
+each real task into 2 symmetric virtual copies, build a genuinely heterogeneous `2N x 2N`
+doubly-stochastic matrix over the 6 virtual nodes, fold back down to `3x3`) -- this also collapses
+to exact mean-field, because Sinkhorn's fixed point must respect the swap-symmetry inherent to
+true duplicates (nodes connected identically to everything), which forces every 2x2 block between
+duplicate-groups to be internally uniform, reducing back to the identical degenerate 3-variable
+system. **`csho_pairwise` on TE_heat is therefore validated as a wiring/regression fix only** (the
+crash is fixed, the spectral math is correct and reduces exactly to mean-field) -- it is not
+evidence for or against whether coupling *structure* helps real multi-field PDE learning. A
+problem with `N>=4` is needed for that question: `MHD` (`N=5`: `Jx,Jy,Jz,u_u,u_v`, natural block
+split `{Jx,Jy,Jz}` vs `{u_u,u_v}`) or `VA` (`N=12`, three natural blocks `{p_t}`/
+`{Sxx,Sxy,Syy}`/`{x_u,x_v}`) are the smallest already-supported candidates. Not attempted this
+round.
+
+**New smoke tests**: `tests/test_experiments_smoke.py::test_experiment_2_physics_smoke_te_heat_csho_pairwise_mean_field`
+(regression: confirms the crash fix) and `..._block` (confirms the block-family CLI path runs
+end-to-end; per the limitation above, it is numerically identical to the mean-field case at
+`N=3`, which is itself the expected/correct behavior, not a bug).
+
 ## Important notes
 
 - `Elder`'s 10-timestep rollout is loaded as 30 extra output channels (3 fields x 10 steps)
@@ -744,5 +801,6 @@ is harmless but was not cleaned up.
 - `diffusion_reaction` has no native train/test split in its single PDEBench HDF5 file; the
   dataset loader creates a deterministic 90/10 split by sample index (first 90% -> `training`,
   last 10% -> `testing`/`val`) so `--split` and `--val-split` are guaranteed disjoint.
-- `csho_pairwise`'s default field-coupling matrix is uniform since there's no obvious
-  "more/less related" prior between, for instance, a problem's velocity and temperature fields.
+- `csho_pairwise`'s default field-coupling matrix is mean-field (see Section 13) -- it's no
+  longer a crash, and this is a deliberate default since there's no obvious "more/less related"
+  prior between, for instance, a problem's velocity and temperature fields without real data.

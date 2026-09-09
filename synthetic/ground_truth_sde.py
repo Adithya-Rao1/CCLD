@@ -59,3 +59,21 @@ def make_ground_truth(
     theta = ((theta + theta.T) / 2).to(device=device)
     sigma_gt = (sigma_scale * torch.eye(N, dtype=dtype)).to(device=device)
     return GroundTruthCoupledOU(theta, sigma_gt)
+
+
+def make_ground_truth_from_coupling(
+    N: int,
+    C: torch.Tensor,
+    coupling_strength: float = 0.5,
+    base_decay: float = 1.0,
+    sigma_scale: float = 1.0,
+) -> GroundTruthCoupledOU:
+    if N < 2 or not (0.0 <= coupling_strength < 1.0):
+        raise ValueError
+    if C.shape != (N, N):
+        raise ValueError
+
+    theta = base_decay * torch.eye(N, dtype=C.dtype, device=C.device) - coupling_strength * base_decay * C
+    theta = (theta + theta.T) / 2
+    sigma_gt = sigma_scale * torch.eye(N, dtype=C.dtype, device=C.device)
+    return GroundTruthCoupledOU(theta, sigma_gt)

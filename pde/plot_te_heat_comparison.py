@@ -12,9 +12,9 @@ import numpy as np
 
 from core.reporting import markdown_table, write_csv
 
-METHODS = ["csho", "ddpm", "sdm"]
-METHOD_LABELS = {"csho": "CSHO", "ddpm": "DDPM", "sdm": "SDM"}
-METHOD_COLORS = {"csho": "#2b7a78", "ddpm": "#c1440e", "sdm": "#5b5f97"}
+METHODS = ["ccld", "ddpm", "sdm"]
+METHOD_LABELS = {"ccld": "CCLD", "ddpm": "DDPM", "sdm": "SDM"}
+METHOD_COLORS = {"ccld": "#2b7a78", "ddpm": "#c1440e", "sdm": "#5b5f97"}
 TE_HEAT_TASKS = ["Re{Ez}", "Im{Ez}", "T"]
 
 
@@ -74,13 +74,13 @@ def plot_field_comparison(
         axes = axes.reshape(2, 1)
 
     for col, name in enumerate(task_names):
-        target = sample_maps["csho"][f"{name}_target"][sample_idx, 0]
+        target = sample_maps["ccld"][f"{name}_target"][sample_idx, 0]
         panels = [target] + [sample_maps[m][f"{name}_pred"][sample_idx, 0] for m in METHODS]
         combined = np.concatenate(panels, axis=1)
 
         ax_map = axes[0, col]
         im = ax_map.imshow(combined, cmap="viridis")
-        ax_map.set_title(f"{name}: true | csho | ddpm | sdm", fontsize=10)
+        ax_map.set_title(f"{name}: true | ccld | ddpm | sdm", fontsize=10)
         ax_map.axis("off")
         fig.colorbar(im, ax=ax_map, fraction=0.046, pad=0.04)
 
@@ -104,7 +104,7 @@ def plot_field_comparison(
 
 
 def main():
-    p = argparse.ArgumentParser(description="CSHO/DDPM/SDM comparison figure + rel_l2 table for TE_heat")
+    p = argparse.ArgumentParser(description="CCLD/DDPM/SDM comparison figure + rel_l2 table for TE_heat")
     p.add_argument("--results-dir", required=True,)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--sample-idx", type=int, default=0, help="which of the saved sample-map rows to plot")
