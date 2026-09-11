@@ -511,22 +511,23 @@ def closed_form_propagator_skew(
     )
     A_vx0 = A_vx0.to(dtype)
     A_vv0 = A_vv0.to(dtype)
+    device = A_vx0.device
 
-    A0_block = torch.zeros(2 * N, 2 * N, dtype=dtype)
-    A0_block[:N, N:] = torch.eye(N, dtype=dtype)
+    A0_block = torch.zeros(2 * N, 2 * N, dtype=dtype, device=device)
+    A0_block[:N, N:] = torch.eye(N, dtype=dtype, device=device)
     A0_block[N:, :N] = A_vx0
     A0_block[N:, N:] = A_vv0
 
     if skew_matrix is not None:
         K = -A_vx0
         Sigma_ref = reference_stationary_covariance(K, target_variance)
-        A0_block = inject_skew_coupling(A0_block, Sigma_ref, skew_matrix.to(dtype))
+        A0_block = inject_skew_coupling(A0_block, Sigma_ref, skew_matrix.to(dtype).to(device))
 
-    L = torch.zeros(2 * N, N, dtype=dtype)
-    L[N:, :] = G0.to(dtype) if G0 is not None else sigma_ref * torch.eye(N, dtype=dtype)
+    L = torch.zeros(2 * N, N, dtype=dtype, device=device)
+    L[N:, :] = G0.to(dtype).to(device) if G0 is not None else sigma_ref * torch.eye(N, dtype=dtype, device=device)
     LLT = L @ L.T
 
-    M = torch.zeros(4 * N, 4 * N, dtype=dtype)
+    M = torch.zeros(4 * N, 4 * N, dtype=dtype, device=device)
     M[:2 * N, :2 * N] = A0_block
     M[:2 * N, 2 * N:] = LLT
     M[2 * N:, 2 * N:] = -A0_block.T
