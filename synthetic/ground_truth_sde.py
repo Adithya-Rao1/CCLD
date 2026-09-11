@@ -7,12 +7,13 @@ from scipy.linalg import solve_continuous_lyapunov
 
 from synthetic.metrics import gaussian_mutual_information_matrix
 
+_DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 
 def _sample_from_covariance(cov: torch.Tensor, N: int, n_samples: int, seed: Optional[int] = None) -> torch.Tensor:
     if seed is not None:
         torch.manual_seed(seed)
-    jitter = 1e-6 * torch.eye(N, dtype=cov.dtype)
-    mean = torch.zeros(N, dtype=cov.dtype)
+    jitter = 1e-6 * torch.eye(N, dtype=cov.dtype, device=_DEVICE)
+    mean = torch.zeros(N, dtype=cov.dtype, device=_DEVICE)
     dist = torch.distributions.MultivariateNormal(mean, covariance_matrix=cov + jitter)
     return dist.sample((n_samples,))
 
@@ -29,7 +30,7 @@ class GroundTruthCoupledOU:
         A = (-self.theta).double().cpu().numpy()
         Q = (-(self.sigma_gt @ self.sigma_gt.T)).double().cpu().numpy()
         cov = solve_continuous_lyapunov(A, Q)
-        cov = torch.as_tensor((cov + cov.T) / 2, dtype=self.theta.dtype)
+        cov = torch.as_tensor((cov + cov.T) / 2, dtype=self.theta.dtype, device=_DEVICE)
         return cov
 
     def pairwise_mutual_information(self) -> torch.Tensor:
@@ -40,16 +41,6 @@ class GroundTruthCoupledOU:
 
 
 class DirectionalGroundTruthOU:
-    """Ground truth for the cross-time joint law (X(tau), X(tau+lag_delta)) of a directional
-    (asymmetric-theta) OU process, doubling N -> 2N: populations N..2N-1 represent "the same
-    physical quantities at time tau+lag_delta". A single-time-slice stationary Gaussian carries
-    no directional information at all (Cov(X(tau)) is symmetric regardless of theta's asymmetry)
-    -- only the lagged cross-covariance Cov(X_i(tau), X_j(tau+lag_delta)) does, and it is generally
-    asymmetric (!= its transpose) exactly when theta is asymmetric. Duck-types
-    GroundTruthCoupledOU's interface (N, stationary_covariance/pairwise_mutual_information/
-    sample_stationary) so it drops into the existing evaluation pipeline unchanged.
-    """
-
     def __init__(self, theta: torch.Tensor, sigma_gt: torch.Tensor, lag_delta: float):
         if theta.shape[0] != theta.shape[1] or sigma_gt.shape != theta.shape:
             raise ValueError
@@ -63,7 +54,7 @@ class DirectionalGroundTruthOU:
         A = (-self.theta).double().cpu().numpy()
         Q = (-(self.sigma_gt @ self.sigma_gt.T)).double().cpu().numpy()
         cov = solve_continuous_lyapunov(A, Q)
-        return torch.as_tensor((cov + cov.T) / 2, dtype=self.theta.dtype)
+        return torch.as_tensor((cov + cov.T) / 2, dtype=self.theta.dtype, device=_DEVICE)
 
     def lagged_cross_covariance(self) -> torch.Tensor:
         """Cov(X(tau), X(tau+lag_delta)) = Sigma @ Phi(lag_delta)^T, Phi(d) = exp(-theta*d)."""

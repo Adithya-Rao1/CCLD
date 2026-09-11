@@ -10,6 +10,7 @@ from core.drift import _time_scale
 from synthetic.drift_coupled_gamma import antisymmetric_mode_damping, calibrate_sigma_fdt, drift_fn_coupled_gamma
 from synthetic.skew_coupling import inject_skew_coupling, reference_stationary_covariance
 
+_DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 
 def elapsed_time_at_step(t_idx: int, T: int, dt: float, time_scale_fn=None, scale_kinematics_with_time: bool = True) -> float:
     if not scale_kinematics_with_time:
@@ -26,7 +27,7 @@ def _extract_Avx_Avv_coupled_gamma(
     k_reference: float, coupling, t: float, T: int, constant_k: bool, time_scale_fn,
     damping_matrix: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    device = coupling.device if coupling is not None else torch.device("cpu")
+    device = coupling.device if coupling is not None else _DEVICE
     K_self = [[torch.tensor([[k_reference]], device=device)] for _ in range(N)]
     K_global = [torch.tensor([[k_reference]], device=device) for _ in range(N)]
     t_tensor = torch.tensor(float(t), device=device)
@@ -173,7 +174,7 @@ def precompute_transition_params(
     scale_kinematics_with_time: bool = True, scale_diffusion_with_time: bool = True,
     damping_matrix: Optional[torch.Tensor] = None,
 ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
-    device = coupling.device if coupling is not None else torch.device("cpu")
+    device = coupling.device if coupling is not None else _DEVICE
     Phi = torch.eye(2 * N, device=device)
     Sigma = torch.zeros(2 * N, 2 * N, device=device)
     params = []
