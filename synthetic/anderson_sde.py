@@ -8,6 +8,7 @@ import torch
 from core.drift import _time_scale
 from core.sde import _primary_noise_and_sigma
 from synthetic.drift_coupled_gamma import drift_fn_coupled_gamma
+from synthetic.skew_coupling import skew_drift_correction
 
 def anderson_em_step_coupled_gamma(
     X: List[List[torch.Tensor]],
@@ -31,6 +32,8 @@ def anderson_em_step_coupled_gamma(
     scale_diffusion_with_time: bool = True,
     k_global_reference: float = 1.0,
     damping_matrix: Optional[torch.Tensor] = None,
+    skew_matrix: Optional[torch.Tensor] = None,
+    skew_sigma_ref: Optional[torch.Tensor] = None,
 ):
     N = len(X)
     dV = drift_fn_coupled_gamma(
@@ -39,6 +42,10 @@ def anderson_em_step_coupled_gamma(
         scale_damping_with_time=scale_damping_with_time, time_scale_fn=time_scale_fn,
         k_global_reference=k_global_reference, damping_matrix=damping_matrix,
     )
+    dX_skew = None
+    if skew_matrix is not None:
+        dX_skew, dV_skew = skew_drift_correction(X, V, skew_matrix, skew_sigma_ref)
+        dV = [[dv + dv_s for dv, dv_s in zip(dV[i], dV_skew[i])] for i in range(N)]
     time_scale = _time_scale(t, T, time_scale_fn)
     kin_scale = time_scale if scale_kinematics_with_time else 1.0
     if scale_diffusion_with_time:
@@ -62,6 +69,8 @@ def anderson_em_step_coupled_gamma(
         V_next.append(v_i)
 
     X_next = [[x + v * kin_scale * dt for x, v in zip(X[i], V_next[i])] for i in range(N)]
+    if dX_skew is not None:
+        X_next = [[xn + dx_s * kin_scale * dt for xn, dx_s in zip(X_next[i], dX_skew[i])] for i in range(N)]
 
     z_list = [primary_noise[i] / primary_sigma[i] for i in range(N)]
     sigma_list = [sqrt_dt * primary_sigma[i] for i in range(N)]
@@ -92,6 +101,8 @@ def anderson_reverse_step_coupled_gamma(
     scale_diffusion_with_time: bool = True,
     k_global_reference: float = 1.0,
     damping_matrix: Optional[torch.Tensor] = None,
+    skew_matrix: Optional[torch.Tensor] = None,
+    skew_sigma_ref: Optional[torch.Tensor] = None,
 ):
     N = len(X)
     t_tensor = torch.as_tensor(t, device=X[0][0].device, dtype=X[0][0].dtype)
@@ -101,6 +112,10 @@ def anderson_reverse_step_coupled_gamma(
         scale_damping_with_time=scale_damping_with_time, time_scale_fn=time_scale_fn,
         k_global_reference=k_global_reference, damping_matrix=damping_matrix,
     )
+    dX_skew = None
+    if skew_matrix is not None:
+        dX_skew, dV_skew = skew_drift_correction(X, V, skew_matrix, skew_sigma_ref)
+        dV = [[dv + dv_s for dv, dv_s in zip(dV[i], dV_skew[i])] for i in range(N)]
     time_scale = _time_scale(t_tensor, T, time_scale_fn)
     kin_scale = time_scale if scale_kinematics_with_time else 1.0
     if scale_diffusion_with_time:
@@ -129,4 +144,6 @@ def anderson_reverse_step_coupled_gamma(
         V_new.append(v_i)
 
     X_new = [[X[i][k].float() - V_new[i][k] * kin_scale * dt for k in range(len(X[i]))] for i in range(N)]
+    if dX_skew is not None:
+        X_new = [[xn - dx_s.float() * kin_scale * dt for xn, dx_s in zip(X_new[i], dX_skew[i])] for i in range(N)]
     return X_new, V_new
