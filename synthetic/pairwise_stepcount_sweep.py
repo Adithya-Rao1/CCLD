@@ -7,13 +7,23 @@ from typing import Dict, List
 import torch
 
 import synthetic.pairwise_n_sweep as pns
+from core.coupling import build_coupling_matrix
 from core.reporting import write_csv
 from core.stats import aggregate_over_seeds
+from synthetic.skew_coupling import parametrize_skew_matrix
 
 N_SWEEP = [2, 3, 4, 5]
 STEP_SWEEP = [8, 16, 32, 64, 128]
 SEEDS = [0, 1, 2, 3, 4]
 OUT_DIR = "results/experiment_3_synthetic/pairwise_stepcount_sweep"
+SKEW_SCALE = 0.5
+SKEW_SEED = 0
+
+
+def _build_skew_matrix(N: int, device) -> torch.Tensor:
+    gen = torch.Generator().manual_seed(SKEW_SEED)
+    W = torch.randn(2 * N, 2 * N, generator=gen) * SKEW_SCALE
+    return parametrize_skew_matrix(W).to(device)
 
 
 def run() -> List[Dict]:
@@ -28,12 +38,16 @@ def run() -> List[Dict]:
 
         for N in N_SWEEP:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            conditions = pns.build_coupling_conditions(N, seed=0, device=device)
-            for label, coupling in conditions:
+            conditions = [(label, c, None) for label, c in pns.build_coupling_conditions(N, seed=0, device=device)]
+            conditions.append((
+                "mean_field+skew", build_coupling_matrix(N, mode="mean_field", device=device),
+                _build_skew_matrix(N, device),
+            ))
+            for label, coupling, skew_matrix in conditions:
                 print(f"\n=== n_diff_steps={n_diff_steps} N={N} condition={label} ===")
                 per_seed = {}
                 for seed in SEEDS:
-                    m = pns.train_one_seed(N, coupling, seed, label=f"steps={n_diff_steps}/{label}")
+                    m = pns.train_one_seed(N, coupling, seed, label=f"steps={n_diff_steps}/{label}", skew_matrix=skew_matrix)
                     per_seed[seed] = m
                     per_seed_rows.append({"n_diff_steps": n_diff_steps, "N": N, "condition": label, "seed": seed, **m})
                     print(f"  seed={seed}: kl={m['kl_divergence']:.4f} corr_gen={m['mean_pairwise_corr_gen']:.4f} corr_true={m['mean_pairwise_corr_true']:.4f}")
