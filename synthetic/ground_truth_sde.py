@@ -7,13 +7,11 @@ from scipy.linalg import solve_continuous_lyapunov
 
 from synthetic.metrics import gaussian_mutual_information_matrix
 
-_DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
-
 def _sample_from_covariance(cov: torch.Tensor, N: int, n_samples: int, seed: Optional[int] = None) -> torch.Tensor:
     if seed is not None:
         torch.manual_seed(seed)
-    jitter = 1e-6 * torch.eye(N, dtype=cov.dtype, device=_DEVICE)
-    mean = torch.zeros(N, dtype=cov.dtype, device=_DEVICE)
+    jitter = 1e-6 * torch.eye(N, dtype=cov.dtype, device=cov.device)
+    mean = torch.zeros(N, dtype=cov.dtype, device=cov.device)
     dist = torch.distributions.MultivariateNormal(mean, covariance_matrix=cov + jitter)
     return dist.sample((n_samples,))
 
@@ -30,7 +28,7 @@ class GroundTruthCoupledOU:
         A = (-self.theta).double().cpu().numpy()
         Q = (-(self.sigma_gt @ self.sigma_gt.T)).double().cpu().numpy()
         cov = solve_continuous_lyapunov(A, Q)
-        cov = torch.as_tensor((cov + cov.T) / 2, dtype=self.theta.dtype, device=_DEVICE)
+        cov = torch.as_tensor((cov + cov.T) / 2, dtype=self.theta.dtype)
         return cov
 
     def pairwise_mutual_information(self) -> torch.Tensor:
@@ -54,12 +52,12 @@ class DirectionalGroundTruthOU:
         A = (-self.theta).double().cpu().numpy()
         Q = (-(self.sigma_gt @ self.sigma_gt.T)).double().cpu().numpy()
         cov = solve_continuous_lyapunov(A, Q)
-        return torch.as_tensor((cov + cov.T) / 2, dtype=self.theta.dtype, device=_DEVICE)
+        return torch.as_tensor((cov + cov.T) / 2, dtype=self.theta.dtype)
 
     def lagged_cross_covariance(self) -> torch.Tensor:
         """Cov(X(tau), X(tau+lag_delta)) = Sigma @ Phi(lag_delta)^T, Phi(d) = exp(-theta*d)."""
         Sigma = self._base_stationary_covariance()
-        Phi = torch.matrix_exp((-self.theta).double() * self.lag_delta).to(Sigma.dtype)
+        Phi = torch.matrix_exp((-self.theta).double().cpu() * self.lag_delta).to(Sigma.dtype)
         return Sigma @ Phi.T
 
     def stationary_covariance(self) -> torch.Tensor:
