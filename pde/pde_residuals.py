@@ -98,7 +98,6 @@ TE_HEAT_EPS_0 = 8.854e-12
 TE_HEAT_KB = 8.6173e-5
 TE_HEAT_EG = 1.12
 
-# See E_FLOW_*_SCALE note above -- same DiffusionPDE generate_TE_heat.py convention.
 TE_HEAT_E_FIELD_RESIDUAL_SCALE = 1e6  # generate_TE_heat.py:171
 TE_HEAT_HEAT_RESIDUAL_SCALE = 1e6     # generate_TE_heat.py:172
 

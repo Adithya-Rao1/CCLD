@@ -174,39 +174,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--k-reference", type=float, default=1.0)
     p.add_argument("--constant-k", action="store_true")
     p.add_argument("--diffusion-mode", default="shared", choices=["shared", "independent"])
-    p.add_argument("--siloed-score-net", action="store_true",
-                    help="Use SiloedCoupledScoreNet/SiloedFlatScoreNet instead of "
-                         "CoupledScoreNet/FlatScoreNet -- each population gets its own "
-                         "private sub-network (sees only its own X_i,V_i,t, never other "
-                         "populations' values). Isolates whether generated correlation "
-                         "comes from the drift's coupling term specifically, vs. from a "
-                         "shared network's joint access to all populations at every step "
-                         "(2026-08-28: CoupledScoreNet/FlatScoreNet both concatenate all "
-                         "N populations as input by default -- this flag removes that "
-                         "channel so only method=csho's drift-level coupling remains).")
-    p.add_argument("--sigma-schedule", default="constant", choices=["constant", "linear_t_over_T"],
-                    help="constant: fixed --sigma throughout (production default). "
-                         "linear_t_over_T: sigma(t) = --sigma * (t/T), from synthetic/exp02 -- "
-                         "backfires (see exp02_linear_noise_schedule_README.md): the corruption "
-                         "map is unstable, so early noise gets amplified most and ramping noise "
-                         "up wastes exactly those injections. Only affects method=csho.")
-    p.add_argument("--time-scale-schedule", default="original", choices=["original", "vp_linear"],
-                    help="original: time_scale=(T-t)/(t+T) -- DECREASING in t, so the "
-                         "pull-together (confinement+coupling+damping) force is exactly "
-                         "0 at t=T (generation start, right after drawing from the prior) "
-                         "and strongest at t=1 (generation end, right before data) -- "
-                         "backwards from how VP-SDE's beta(t) behaves (2026-08-28 "
-                         "diagnosis: this is why generated variance grows during "
-                         "sampling instead of shrinking, and correlation only gets a "
-                         "narrow late window to build). "
-                         "vp_linear: time_scale=t/T -- INCREASING in t, mirroring VP-SDE's "
-                         "beta(t) shape (core/baselines.py::vp_beta_t) rescaled to CSHO's "
-                         "own alpha/beta/gamma magnitude range (not VP-SDE's raw "
-                         "beta_min=0.1/beta_max=20, which would over-scale relative to "
-                         "what those are calibrated for) -- strong pull right when "
-                         "generation starts from noise, tapering as it approaches data. "
-                         "Since t_idx in {1,...,T} never reaches 0, this never hits "
-                         "exactly zero at either endpoint either. Only affects method=csho.")
+    p.add_argument("--siloed-score-net", action="store_true",)
+    p.add_argument("--sigma-schedule", default="constant", choices=["constant", "linear_t_over_T"],)
+    p.add_argument("--time-scale-schedule", default="original", choices=["original", "vp_linear"],)
 
     p.add_argument("--n-diff-steps", type=int, default=20)
     p.add_argument("--dt", type=float, default=0.05)
@@ -267,20 +237,12 @@ def _vp_linear_time_scale(t, T) -> torch.Tensor:
 
 
 def _time_scale_fn_for(args):
-    """Returns None (drift_fn_n's default (T-t)/(t+T)) or _vp_linear_time_scale,
-    per --time-scale-schedule. None is threaded through unchanged everywhere this is
-    used (drift_fn_n's own default), so "original" reproduces the exact prior behavior."""
     if args.time_scale_schedule == "vp_linear":
         return _vp_linear_time_scale
     return None
 
 
 def _diffusion_mode_g_fn(args, N: int, coupling: torch.Tensor, device):
-    """Returns g_fn(t, T) -> (N,N) diffusion matrix. sigma_schedule="constant"
-    (production default) ignores t; "linear_t_over_T" (synthetic/exp02) scales --sigma
-    by (t/T) -- see exp02's README in results/schedule_experiments/ for why this
-    backfires (the corruption map is unstable, so early noise gets amplified most and
-    ramping noise up wastes exactly those injections)."""
     def sigma_at(t, T) -> float:
         if args.sigma_schedule == "linear_t_over_T":
             return args.sigma * (float(t) / float(T))
@@ -301,9 +263,6 @@ def _build_csho_state(args: argparse.Namespace, device):
     N = args.N
     mode = CSHO_METHODS[args.method]
     if mode == "pairwise":
-        # No task-identity prior between anonymous populations (unlike image/pde's named
-        # tasks) -- default to a uniform off-diagonal weight matrix, same convention as
-        # image/pde's "no obvious more/less related prior" default.
         weights = torch.ones((N, N), device=device)
         coupling = build_coupling_matrix(N, mode="pairwise", weights=weights, device=device)
     else:
@@ -335,10 +294,6 @@ def _estimate_prior_std(args, gt: GroundTruthCoupledOU, K_self, K_global, coupli
     X = [[X0[:, i : i + 1].clone()] for i in range(args.N)]
     V = [[torch.zeros_like(X0[:, i : i + 1])] for i in range(args.N)]
     K_self_p, K_global_p = _make_conditioning(args.N, B, args.k_reference, device)
-    # Chain the FULL trajectory (not a single step at t=n_diff_steps, whose
-    # time_scale=(T-t)/(t+T)=0 makes the drift vanish and would grossly
-    # underestimate the true T-step accumulated noise) -- matches the fix in
-    # train_csho below.
     for step in range(1, args.n_diff_steps + 1):
         X, V, _, _, _ = em_step_n(
             X, V, K_self_p, K_global_p, step, args.n_diff_steps,

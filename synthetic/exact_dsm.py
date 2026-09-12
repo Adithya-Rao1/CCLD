@@ -481,9 +481,7 @@ def closed_form_propagator(
 
     max_real_eig = torch.linalg.eigvals(J).real.abs().max().item()
     if tau_hat * max_real_eig > 600.0:
-        raise OverflowError(
-            f"tau_hat={tau_hat:.3g} * max|Re(eig(J))|={max_real_eig:.3g} = {tau_hat * max_real_eig:.3g} is too large for a stable matrix_exp"
-        )
+        raise OverflowError
 
     Mexp = torch.matrix_exp(tau_hat * M)
     Phi = Mexp[:2 * N, :2 * N]
@@ -534,9 +532,7 @@ def closed_form_propagator_skew(
 
     max_real_eig = torch.linalg.eigvals(A0_block).real.abs().max().item()
     if tau_hat * max_real_eig > 600.0:
-        raise OverflowError(
-            f"tau_hat={tau_hat:.3g} * max|Re(eig(A0))|={max_real_eig:.3g} = {tau_hat * max_real_eig:.3g} is too large for a stable matrix_exp"
-        )
+        raise OverflowError
 
     Mexp = torch.matrix_exp(tau_hat * M)
     Phi = Mexp[:2 * N, :2 * N]

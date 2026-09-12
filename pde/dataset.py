@@ -96,7 +96,7 @@ def _load_mat_field(path: str) -> np.ndarray:
     mat = sio.loadmat(path)
     keys = [k for k in mat if not k.startswith("__")]
     if not keys:
-        raise ValueError(f"{path}: .mat file contains no data variables")
+        raise ValueError
     if len(keys) == 1:
         return np.asarray(mat[keys[0]])
     stem = os.path.splitext(os.path.basename(path))[0]
@@ -113,16 +113,16 @@ def _load_csv_field(path: str) -> np.ndarray:
 def _to_chw_tensor(arr: np.ndarray, size: Tuple[int, int]) -> torch.Tensor:
     arr = np.asarray(arr)
     if np.iscomplexobj(arr):
-        raise ValueError("complex arrays must go through _complex_to_real_imag first")
+        raise ValueError
     arr = arr.astype(np.float32)
     if arr.ndim == 1:
         n = arr.shape[0]
         side = int(round(math.sqrt(n)))
         if side * side != n:
-            raise ValueError(f"cannot infer a square grid from a flat array of length {n}")
+            raise ValueError
         arr = arr.reshape(side, side)
     if arr.ndim != 2:
-        raise ValueError(f"expected a 2D field, got shape {arr.shape}")
+        raise ValueError
     t = torch.from_numpy(np.ascontiguousarray(arr)).unsqueeze(0).unsqueeze(0)
     if tuple(t.shape[-2:]) != tuple(size):
         t = F.interpolate(t, size=size, mode="bilinear", align_corners=False)
@@ -275,19 +275,16 @@ def _load_pdebench_diffusion_reaction(root_dir: str) -> np.ndarray:
         else:
             keys = sorted(k for k in f.keys() if isinstance(f[k], h5py.Group))
             if not keys:
-                raise ValueError(
-                    f"{path}: neither a top-level 'data' dataset nor per-sample groups found; "
-                    f"top-level keys={list(f.keys())}"
-                )
+                raise ValueError
             arrs = []
             for k in keys:
                 grp = f[k]
                 if "data" not in grp:
-                    raise ValueError(f"{path}: group {k!r} has no 'data' dataset; keys={list(grp.keys())}")
+                    raise ValueError
                 arrs.append(np.asarray(grp["data"]))
             arr = np.stack(arrs, axis=0)
     if arr.ndim != 5 or arr.shape[-1] < 2:
-        raise ValueError(f"{path}: expected a (N,T,X,Y,C>=2) array (documented PDEBench layout), got shape {arr.shape}")
+        raise ValueError
     return arr
 
 
@@ -305,7 +302,7 @@ class MultiPhysicsFieldDataset(Dataset):
         pde_second_snapshot: Optional[int] = None,
     ):
         if problem not in ALL_PROBLEMS:
-            raise ValueError(f"Unknown problem {problem!r}; choose from {ALL_PROBLEMS}")
+            raise ValueError
         self.root_dir = root_dir
         self.problem = problem
         self.split = split
@@ -330,10 +327,7 @@ class MultiPhysicsFieldDataset(Dataset):
         train_keys = {"training", "train"}
         test_keys = {"testing", "test", "val", "validation"}
         if split_key not in train_keys and split_key not in test_keys:
-            raise ValueError(
-                f"Unknown split {self.split!r} for diffusion_reaction; expected one of "
-                f"{sorted(train_keys | test_keys)}"
-            )
+            raise ValueError
         n_train = int(round(n_samples_total * 0.9))
         if n_samples_total >= 2:
             n_train = min(max(n_train, 1), n_samples_total - 1)
@@ -356,7 +350,7 @@ class MultiPhysicsFieldDataset(Dataset):
         elif n_tasks is None or n_tasks == 4:
             labels = native_labels
         else:
-            raise ValueError(f"diffusion_reaction supports n_tasks in {{2,4}} (or an explicit task_subset), got {n_tasks}")
+            raise ValueError
         self.task_names = labels
 
         snap1 = pde_snapshot if pde_snapshot is not None else n_t // 2
@@ -406,16 +400,13 @@ class MultiPhysicsFieldDataset(Dataset):
         elif n_tasks is not None and n_tasks != len(native_labels):
             key = (self.problem, n_tasks)
             if key not in TASK_SUBSETS:
-                raise ValueError(
-                    f"{self.problem} has no defined task_subset for n_tasks={n_tasks} "
-                    f"(native n_tasks={len(native_labels)}); pass --task-subset explicitly."
-                )
+                raise ValueError
             labels = TASK_SUBSETS[key]
         else:
             labels = native_labels
         unknown = [l for l in labels if l not in native_labels]
         if unknown:
-            raise ValueError(f"task_subset {unknown} not among native labels {native_labels} for {self.problem}")
+            raise ValueError
         self.task_names = labels
 
         if self._use_held_out_split:

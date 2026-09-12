@@ -55,7 +55,6 @@ class DirectionalGroundTruthOU:
         return torch.as_tensor((cov + cov.T) / 2, dtype=self.theta.dtype)
 
     def lagged_cross_covariance(self) -> torch.Tensor:
-        """Cov(X(tau), X(tau+lag_delta)) = Sigma @ Phi(lag_delta)^T, Phi(d) = exp(-theta*d)."""
         Sigma = self._base_stationary_covariance()
         Phi = torch.matrix_exp((-self.theta).double().cpu() * self.lag_delta).to(Sigma.dtype)
         return Sigma @ Phi.T

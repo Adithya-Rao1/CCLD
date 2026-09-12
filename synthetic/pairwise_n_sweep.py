@@ -89,7 +89,7 @@ def _estimate_prior_std_anderson(
 def train_csho_pairwise(N: int, coupling: torch.Tensor, gt: GroundTruthCoupledOU, device, desc: str = "", skew_matrix=None):
     Gamma = calibrate_coupled_gammas_spectral(ALPHA_V, BETA, K_REFERENCE, K_REFERENCE, coupling, target_zeta=TARGET_ZETA)
     G0 = calibrate_sigma_fdt_spectral(Gamma, coupling, target_variance=1.0)
-    g_fn = lambda t, T: G0  # noqa: E731; matches _g_fn's constant time schedule, but with the full spectral G0 rather than a*I+b*C
+    g_fn = lambda t, T: G0  # matches _g_fn's constant time schedule
 
     skew_sigma_ref = None
     params = params_skew = None

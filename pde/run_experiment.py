@@ -182,7 +182,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     args = parser.parse_args(argv)
 
     if args.data_root is None:
-        raise ValueError("--data-root is required (directly, or via data.data_root in --config)")
+        raise ValueError
 
     args.seeds = [int(s) for s in str(args.seeds).split(",") if s.strip() != ""]
     args.task_subset = [t.strip() for t in args.task_subset.split(",")] if args.task_subset else None
@@ -191,7 +191,7 @@ def parse_args(argv=None) -> argparse.Namespace:
         if args.coupling_block_sizes else None
     )
     if args.method == "csho_pairwise" and args.coupling_family == "block" and args.coupling_block_sizes is None:
-        raise ValueError("--coupling-block-sizes is required when --coupling-family block")
+        raise ValueError
     if args.skew_coupling_family != "none":
         if args.method != "csho_pairwise":
             raise ValueError
@@ -219,7 +219,7 @@ def _build_pde_coupling(args, method: str, N: int, device, seed: int) -> torch.T
                                    device=device)
         if family == "random_heterogeneous":
             return random_heterogeneous_coupling(N, args.coupling_epsilon, seed, device=device)
-        raise ValueError(f"Unknown coupling_family {family!r}")
+        raise ValueError
     cfg = METHOD_CONFIGS[method]
     return build_coupling_matrix(N, mode=cfg["coupling_mode"], device=device)
 
@@ -272,7 +272,7 @@ def build_method_state(args, N: int, device, coupling=None, sigma_ab=None):
                 "ddpm_sched": make_ddpm_schedule(args.n_diff_steps, device=device)}
     if args.method == "sdm":
         return {"is_csho": False, "cfg": None, "coupling": None, "g_per_task": None, "ddpm_sched": None}
-    raise ValueError(f"Unknown method {args.method!r}")
+    raise ValueError
 
 
 def relative_l2_error_per_sample(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
@@ -815,7 +815,7 @@ def main():
 
     if args.encoder_only:
         if not args.save_encoder_dir:
-            raise ValueError("--encoder-only requires --save-encoder-dir")
+            raise ValueError
         for seed in args.seeds:
             train_encoder_only(args, seed)
         print(f"Done. Encoder checkpoints written to {args.save_encoder_dir}")
