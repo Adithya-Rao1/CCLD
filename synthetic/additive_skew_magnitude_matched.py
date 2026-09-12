@@ -6,6 +6,7 @@ from typing import Dict, List, Tuple
 
 import torch
 
+import synthetic.additive_skew_learning_diagnostics as asld
 import synthetic.additive_skew_pairwise as asp
 from core.coupling import build_coupling_matrix
 from core.reporting import write_csv
@@ -51,6 +52,7 @@ def run() -> None:
     os.makedirs(OUT_DIR, exist_ok=True)
     asp.N_DIFF_STEPS = N_DIFF_STEPS
     asp.DT = 1.0 / N_DIFF_STEPS
+    asld.N_DIFF_STEPS = N_DIFF_STEPS
 
     norm_rows: List[Dict] = []
     loss_curve_all: List[Dict] = []
@@ -136,4 +138,5 @@ if __name__ == "__main__":
         HELD_OUT_BATCH = 32
         N_SWEEP = [2, 3]
         N_DIFF_STEPS = 8
+        STRUCTURED_SCALE = 1.0
     run()
