@@ -21,5 +21,7 @@ results/
 *.bak
 tests/
 image/
+pde/README.md
+synthetic/README.md
 *.mat
 RESULTS.md

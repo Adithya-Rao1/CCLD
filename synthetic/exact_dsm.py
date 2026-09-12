@@ -8,7 +8,9 @@ import torch
 from core.coupling import build_coupling_matrix
 from core.drift import _time_scale
 from synthetic.drift_coupled_gamma import antisymmetric_mode_damping, calibrate_sigma_fdt, drift_fn_coupled_gamma
+from synthetic.skew_coupling import inject_skew_coupling, reference_stationary_covariance
 
+_DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 
 def elapsed_time_at_step(t_idx: int, T: int, dt: float, time_scale_fn=None, scale_kinematics_with_time: bool = True) -> float:
     if not scale_kinematics_with_time:
@@ -25,7 +27,7 @@ def _extract_Avx_Avv_coupled_gamma(
     k_reference: float, coupling, t: float, T: int, constant_k: bool, time_scale_fn,
     damping_matrix: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    device = coupling.device if coupling is not None else torch.device("cpu")
+    device = coupling.device if coupling is not None else _DEVICE
     K_self = [[torch.tensor([[k_reference]], device=device)] for _ in range(N)]
     K_global = [torch.tensor([[k_reference]], device=device) for _ in range(N)]
     t_tensor = torch.tensor(float(t), device=device)
@@ -172,7 +174,7 @@ def precompute_transition_params(
     scale_kinematics_with_time: bool = True, scale_diffusion_with_time: bool = True,
     damping_matrix: Optional[torch.Tensor] = None,
 ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
-    device = coupling.device if coupling is not None else torch.device("cpu")
+    device = coupling.device if coupling is not None else _DEVICE
     Phi = torch.eye(2 * N, device=device)
     Sigma = torch.zeros(2 * N, 2 * N, device=device)
     params = []
@@ -372,6 +374,44 @@ def sample_and_analytic_score_target_spectral(
     return Zt, score_v_reg
 
 
+def score_target_from_covariance(
+    Sigma: torch.Tensor, N: int, jitter: float = 1e-8,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    Sxx = Sigma[:N, :N]
+    Sxv = Sigma[:N, N:]
+    Svv = Sigma[N:, N:]
+    eye = torch.eye(N, device=Sigma.device, dtype=Sigma.dtype)
+    Sxx_inv = torch.linalg.inv(Sxx + jitter * eye)
+    coeff = Sxv.T @ Sxx_inv
+    var_v_given_x = Svv - Sxv.T @ Sxx_inv @ Sxv
+    precision = torch.linalg.inv(var_v_given_x + jitter * eye)
+    return precision, coeff
+
+
+def sample_and_analytic_score_target_skew(
+    Z0: torch.Tensor, Phi_t: torch.Tensor, Sigma_t: torch.Tensor, jitter: float = 1e-6,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    N = Phi_t.shape[0] // 2
+    B = Z0.shape[0]
+    device = Z0.device
+    mean = Z0 @ Phi_t.T
+    scale = Sigma_t.diagonal().abs().max().clamp_min(1.0)
+    Sigma_reg = Sigma_t + jitter * scale * torch.eye(2 * N, device=device, dtype=Sigma_t.dtype)
+    L_chol = torch.linalg.cholesky(Sigma_reg)
+    eps = torch.randn(B, 2 * N, device=device)
+    Zt = mean + eps @ L_chol.T
+
+    reg_precision, regression_coeff = score_target_from_covariance(Sigma_t, N)
+
+    diff_x = Zt[:, :N] - mean[:, :N]
+    diff_v = Zt[:, N:] - mean[:, N:]
+    E_V_given_X_dev = diff_x @ regression_coeff.T
+    resid = diff_v - E_V_given_X_dev
+
+    score_v_reg = -resid @ reg_precision.T
+    return Zt, score_v_reg
+
+
 def sample_and_analytic_score_target(
     Z0: torch.Tensor, Phi_t: torch.Tensor, N: int,
     gamma_self: float, gamma_couple: float, q: torch.Tensor, target_variance: float = 1.0, jitter: float = 1e-6,
@@ -415,9 +455,7 @@ def closed_form_propagator(
     damping_matrix: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     if not constant_k:
-        raise ValueError(
-            "closed_form_propagator requires constant_k=True"
-        )
+        raise ValueError
     const_one = lambda t, T: torch.tensor(1.0)
     A_vx0, A_vv0 = _extract_Avx_Avv_coupled_gamma(
         N, gamma_self, gamma_couple, alpha, beta, k_reference, coupling,
@@ -445,6 +483,59 @@ def closed_form_propagator(
     if tau_hat * max_real_eig > 600.0:
         raise OverflowError(
             f"tau_hat={tau_hat:.3g} * max|Re(eig(J))|={max_real_eig:.3g} = {tau_hat * max_real_eig:.3g} is too large for a stable matrix_exp"
+        )
+
+    Mexp = torch.matrix_exp(tau_hat * M)
+    Phi = Mexp[:2 * N, :2 * N]
+    Phi_Sigma = Mexp[:2 * N, 2 * N:]
+    Sigma = Phi_Sigma @ Phi.T
+    return Phi, Sigma
+
+
+def closed_form_propagator_skew(
+    N: int, gamma_self: Optional[float], gamma_couple: Optional[float], alpha: List[float], beta: List[float],
+    k_reference: float, coupling: Optional[torch.Tensor], tau_hat: float,
+    constant_k: bool = False, sigma_ref: float = 1.0, dtype=torch.float32,
+    G0: Optional[torch.Tensor] = None,
+    damping_matrix: Optional[torch.Tensor] = None,
+    skew_matrix: Optional[torch.Tensor] = None,
+    target_variance: float = 1.0,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    if not constant_k:
+        raise ValueError
+    const_one = lambda t, T: torch.tensor(1.0)
+    A_vx0, A_vv0 = _extract_Avx_Avv_coupled_gamma(
+        N, gamma_self, gamma_couple, alpha, beta, k_reference, coupling,
+        t=1, T=1, constant_k=constant_k, time_scale_fn=const_one,
+        damping_matrix=damping_matrix,
+    )
+    A_vx0 = A_vx0.to(dtype)
+    A_vv0 = A_vv0.to(dtype)
+    device = A_vx0.device
+
+    A0_block = torch.zeros(2 * N, 2 * N, dtype=dtype, device=device)
+    A0_block[:N, N:] = torch.eye(N, dtype=dtype, device=device)
+    A0_block[N:, :N] = A_vx0
+    A0_block[N:, N:] = A_vv0
+
+    if skew_matrix is not None:
+        K = -A_vx0
+        Sigma_ref = reference_stationary_covariance(K, target_variance)
+        A0_block = inject_skew_coupling(A0_block, Sigma_ref, skew_matrix.to(dtype).to(device))
+
+    L = torch.zeros(2 * N, N, dtype=dtype, device=device)
+    L[N:, :] = G0.to(dtype).to(device) if G0 is not None else sigma_ref * torch.eye(N, dtype=dtype, device=device)
+    LLT = L @ L.T
+
+    M = torch.zeros(4 * N, 4 * N, dtype=dtype, device=device)
+    M[:2 * N, :2 * N] = A0_block
+    M[:2 * N, 2 * N:] = LLT
+    M[2 * N:, 2 * N:] = -A0_block.T
+
+    max_real_eig = torch.linalg.eigvals(A0_block).real.abs().max().item()
+    if tau_hat * max_real_eig > 600.0:
+        raise OverflowError(
+            f"tau_hat={tau_hat:.3g} * max|Re(eig(A0))|={max_real_eig:.3g} = {tau_hat * max_real_eig:.3g} is too large for a stable matrix_exp"
         )
 
     Mexp = torch.matrix_exp(tau_hat * M)

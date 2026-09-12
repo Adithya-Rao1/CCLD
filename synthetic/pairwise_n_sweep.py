@@ -13,9 +13,13 @@ from core.sde import build_g_matrix_n
 from core.stats import aggregate_over_seeds, compare_configs
 from synthetic.anderson_sde import anderson_em_step_coupled_gamma, anderson_reverse_step_coupled_gamma
 from synthetic.drift_coupled_gamma import calibrate_coupled_gammas_spectral, calibrate_sigma_fdt_spectral
-from synthetic.exact_dsm import elapsed_time_at_step, precompute_transition_params, sample_and_analytic_score_target_spectral
+from synthetic.exact_dsm import (
+    _extract_Avx_Avv_coupled_gamma, closed_form_propagator_skew, elapsed_time_at_step,
+    precompute_transition_params, sample_and_analytic_score_target_skew, sample_and_analytic_score_target_spectral,
+)
 from synthetic.ground_truth_sde import GroundTruthCoupledOU, make_ground_truth_from_coupling
 from synthetic.run_experiment import CoupledScoreNet, _make_conditioning, evaluate_sampling_quality
+from synthetic.skew_coupling import reference_stationary_covariance
 
 
 def _constant_tau_time_scale(t, T) -> torch.Tensor:
@@ -61,7 +65,10 @@ def _g_fn(N: int, sigma_ab: Tuple[float, float], coupling: torch.Tensor, device)
     return g_fn
 
 
-def _estimate_prior_std_anderson(N: int, gt: GroundTruthCoupledOU, coupling, Gamma, g_fn, device) -> Tuple[List[float], List[float]]:
+def _estimate_prior_std_anderson(
+    N: int, gt: GroundTruthCoupledOU, coupling, Gamma, g_fn, device,
+    skew_matrix=None, skew_sigma_ref=None,
+) -> Tuple[List[float], List[float]]:
     B = 512
     X0 = gt.sample_stationary(B).to(device)
     X = [[X0[:, i : i + 1].clone()] for i in range(N)]
@@ -72,21 +79,39 @@ def _estimate_prior_std_anderson(N: int, gt: GroundTruthCoupledOU, coupling, Gam
             X, V, K_self_p, K_global_p, step, N_DIFF_STEPS,
             [ALPHA_V] * N, [BETA] * N, None, None, coupling, True, DT,
             g_fn(step, N_DIFF_STEPS), time_scale_fn=TIME_SCALE_FN, damping_matrix=Gamma,
+            skew_matrix=skew_matrix, skew_sigma_ref=skew_sigma_ref,
         )
     prior_std_x = [max(X[i][0].std().item(), 1e-3) for i in range(N)]
     prior_std_v = [max(V[i][0].std().item(), 1e-3) for i in range(N)]
     return prior_std_x, prior_std_v
 
 
-def train_csho_pairwise(N: int, coupling: torch.Tensor, gt: GroundTruthCoupledOU, device, desc: str = ""):
+def train_csho_pairwise(N: int, coupling: torch.Tensor, gt: GroundTruthCoupledOU, device, desc: str = "", skew_matrix=None):
     Gamma = calibrate_coupled_gammas_spectral(ALPHA_V, BETA, K_REFERENCE, K_REFERENCE, coupling, target_zeta=TARGET_ZETA)
     G0 = calibrate_sigma_fdt_spectral(Gamma, coupling, target_variance=1.0)
     g_fn = lambda t, T: G0  # noqa: E731; matches _g_fn's constant time schedule, but with the full spectral G0 rather than a*I+b*C
 
-    params = precompute_transition_params(
-        N, None, None, [ALPHA_V] * N, [BETA] * N, K_REFERENCE, coupling,
-        N_DIFF_STEPS, DT, g_fn, True, TIME_SCALE_FN, damping_matrix=Gamma,
-    )
+    skew_sigma_ref = None
+    params = params_skew = None
+    if skew_matrix is not None:
+        A_vx0, _ = _extract_Avx_Avv_coupled_gamma(
+            N, None, None, [ALPHA_V] * N, [BETA] * N, K_REFERENCE, coupling,
+            t=1, T=1, constant_k=True, time_scale_fn=lambda t, T: torch.tensor(1.0), damping_matrix=Gamma,
+        )
+        skew_sigma_ref = reference_stationary_covariance(-A_vx0.to(device), target_variance=1.0)
+        params_skew = [
+            closed_form_propagator_skew(
+                N, None, None, [ALPHA_V] * N, [BETA] * N, K_REFERENCE, coupling,
+                tau_hat=elapsed_time_at_step(t_idx, N_DIFF_STEPS, DT, TIME_SCALE_FN),
+                constant_k=True, G0=G0, damping_matrix=Gamma, skew_matrix=skew_matrix, target_variance=1.0,
+            )
+            for t_idx in range(1, N_DIFF_STEPS + 1)
+        ]
+    else:
+        params = precompute_transition_params(
+            N, None, None, [ALPHA_V] * N, [BETA] * N, K_REFERENCE, coupling,
+            N_DIFF_STEPS, DT, g_fn, True, TIME_SCALE_FN, damping_matrix=Gamma,
+        )
 
     score_net = CoupledScoreNet(N, 64, 3, 16).to(device)
     optimizer = torch.optim.Adam(score_net.parameters(), lr=1e-3)
@@ -97,10 +122,14 @@ def train_csho_pairwise(N: int, coupling: torch.Tensor, gt: GroundTruthCoupledOU
         X0 = gt.sample_stationary(BATCH_SIZE).to(device)
         Z0 = torch.cat([X0, torch.zeros_like(X0)], dim=1)
         t_idx = torch.randint(1, N_DIFF_STEPS + 1, (1,)).item()
-        Phi_t, _ = params[t_idx - 1]
-        q = elapsed_time_at_step(t_idx, N_DIFF_STEPS, DT, TIME_SCALE_FN)
 
-        Zt, score_v_target = sample_and_analytic_score_target_spectral(Z0, Phi_t, Gamma, coupling, q)
+        if params_skew is not None:
+            Phi_t, Sigma_t = params_skew[t_idx - 1]
+            Zt, score_v_target = sample_and_analytic_score_target_skew(Z0, Phi_t, Sigma_t)
+        else:
+            Phi_t, _ = params[t_idx - 1]
+            q = elapsed_time_at_step(t_idx, N_DIFF_STEPS, DT, TIME_SCALE_FN)
+            Zt, score_v_target = sample_and_analytic_score_target_spectral(Z0, Phi_t, Gamma, coupling, q)
         X_t = [[Zt[:, i : i + 1]] for i in range(N)]
         V_t = [[Zt[:, N + i : N + i + 1]] for i in range(N)]
 
@@ -118,12 +147,17 @@ def train_csho_pairwise(N: int, coupling: torch.Tensor, gt: GroundTruthCoupledOU
         pbar.update(1)
     pbar.close()
 
-    prior_std = _estimate_prior_std_anderson(N, gt, coupling, Gamma, g_fn, device)
-    return score_net, Gamma, G0, prior_std
+    prior_std = _estimate_prior_std_anderson(
+        N, gt, coupling, Gamma, g_fn, device, skew_matrix=skew_matrix, skew_sigma_ref=skew_sigma_ref,
+    )
+    return score_net, Gamma, G0, prior_std, skew_sigma_ref
 
 
 @torch.no_grad()
-def sample_csho_anderson(N: int, coupling: torch.Tensor, score_net, Gamma, G0, prior_std, device, desc: str = ""):
+def sample_csho_anderson(
+    N: int, coupling: torch.Tensor, score_net, Gamma, G0, prior_std, device, desc: str = "",
+    skew_matrix=None, skew_sigma_ref=None,
+):
     g_fn = lambda t, T: G0  # noqa: E731
     K_self, K_global = _make_conditioning(N, N_SAMPLES, K_REFERENCE, device)
     prior_std_x, prior_std_v = prior_std
@@ -137,6 +171,7 @@ def sample_csho_anderson(N: int, coupling: torch.Tensor, score_net, Gamma, G0, p
             X, V, K_self, K_global, score_outputs, t_idx, N_DIFF_STEPS,
             [ALPHA_V] * N, [BETA] * N, None, None, coupling, True, DT,
             g_fn(t_idx, N_DIFF_STEPS), time_scale_fn=TIME_SCALE_FN, damping_matrix=Gamma,
+            skew_matrix=skew_matrix, skew_sigma_ref=skew_sigma_ref,
         )
         pbar.set_postfix(t_idx=t_idx, x_std=f"{X[0][0].std().item():.3f}")
         pbar.update(1)
@@ -144,14 +179,27 @@ def sample_csho_anderson(N: int, coupling: torch.Tensor, score_net, Gamma, G0, p
     return torch.cat([X[i][0] for i in range(N)], dim=-1)
 
 
-def train_one_seed(N: int, coupling: torch.Tensor, seed: int, label: str = "") -> Dict[str, float]:
+def train_one_seed(
+    N: int, coupling: torch.Tensor, seed: int, label: str = "", skew_matrix=None,
+    gt=None, return_samples: bool = False,
+):
     torch.manual_seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    gt = make_ground_truth_from_coupling(N, coupling.to(device), COUPLING_STRENGTH)
+    if gt is None:
+        gt = make_ground_truth_from_coupling(N, coupling.to(device), COUPLING_STRENGTH)
     tag = f"[N={N}/{label}] seed={seed}" if label else f"[N={N}] seed={seed}"
-    score_net, Gamma, G0, prior_std = train_csho_pairwise(N, coupling, gt, device, desc=f"{tag} train")
-    generated = sample_csho_anderson(N, coupling, score_net, Gamma, G0, prior_std, device, desc=f"{tag} sample")
-    return evaluate_sampling_quality(generated, gt)
+    skew_matrix_dev = skew_matrix.to(device) if skew_matrix is not None else None
+    score_net, Gamma, G0, prior_std, skew_sigma_ref = train_csho_pairwise(
+        N, coupling, gt, device, desc=f"{tag} train", skew_matrix=skew_matrix_dev,
+    )
+    generated = sample_csho_anderson(
+        N, coupling, score_net, Gamma, G0, prior_std, device, desc=f"{tag} sample",
+        skew_matrix=skew_matrix_dev, skew_sigma_ref=skew_sigma_ref,
+    )
+    metrics = evaluate_sampling_quality(generated, gt)
+    if return_samples:
+        return metrics, generated
+    return metrics
 
 
 def run():

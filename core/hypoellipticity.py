@@ -73,12 +73,15 @@ def linearize_coupled_gamma_drift(
     gamma_self: Optional[float] = None,
     gamma_couple: Optional[float] = None,
     damping_matrix: Optional[torch.Tensor] = None,
+    skew_matrix: Optional[torch.Tensor] = None,
+    skew_sigma_ref: Optional[torch.Tensor] = None,
     shape: Tuple[int, ...] = (2, 2),
     scale_damping_with_time: bool = True,
     time_scale_fn: Optional[Callable[[torch.Tensor, int], torch.Tensor]] = None,
     scale_kinematics_with_time: bool = True,
 ) -> Tuple[np.ndarray, int]:
     from synthetic.drift_coupled_gamma import drift_fn_coupled_gamma
+    from synthetic.skew_coupling import skew_drift_correction
 
     n = int(torch.zeros(shape).numel())
     time_scale = _time_scale(t, T, time_scale_fn)
@@ -92,8 +95,13 @@ def linearize_coupled_gamma_drift(
             scale_damping_with_time=scale_damping_with_time, time_scale_fn=time_scale_fn,
             damping_matrix=damping_matrix,
         )
-        dX = [kin_scale * V[i][0].reshape(-1) for i in range(N)]
-        dV_flat = [dV[i][0].reshape(-1) for i in range(N)]
+        if skew_matrix is not None:
+            dX_skew, dV_skew = skew_drift_correction(X, V, skew_matrix, skew_sigma_ref)
+            dX = [kin_scale * V[i][0].reshape(-1) + dX_skew[i][0].reshape(-1) for i in range(N)]
+            dV_flat = [dV[i][0].reshape(-1) + dV_skew[i][0].reshape(-1) for i in range(N)]
+        else:
+            dX = [kin_scale * V[i][0].reshape(-1) for i in range(N)]
+            dV_flat = [dV[i][0].reshape(-1) for i in range(N)]
         return torch.cat(dX + dV_flat)
 
     z0 = torch.zeros(2 * N * n)
@@ -115,6 +123,8 @@ def hypoellipticity_check_coupled_gamma(
     gamma_self: Optional[float] = None,
     gamma_couple: Optional[float] = None,
     damping_matrix: Optional[torch.Tensor] = None,
+    skew_matrix: Optional[torch.Tensor] = None,
+    skew_sigma_ref: Optional[torch.Tensor] = None,
     shape: Tuple[int, ...] = (2, 2),
     tol: float = 1e-8,
     scale_damping_with_time: bool = True,
@@ -124,7 +134,8 @@ def hypoellipticity_check_coupled_gamma(
 ) -> Dict:
     A, n = linearize_coupled_gamma_drift(
         N, K_self, K_global, t, T, alpha, beta, coupling_matrix, constant_k,
-        gamma_self=gamma_self, gamma_couple=gamma_couple, damping_matrix=damping_matrix, shape=shape,
+        gamma_self=gamma_self, gamma_couple=gamma_couple, damping_matrix=damping_matrix,
+        skew_matrix=skew_matrix, skew_sigma_ref=skew_sigma_ref, shape=shape,
         scale_damping_with_time=scale_damping_with_time, time_scale_fn=time_scale_fn,
         scale_kinematics_with_time=scale_kinematics_with_time,
     )

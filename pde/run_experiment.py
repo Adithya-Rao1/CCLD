@@ -27,9 +27,11 @@ from synthetic.drift_coupled_gamma import (
     calibrate_sigma_fdt_spectral,
 )
 from synthetic.exact_dsm import (
-    elapsed_time_at_step, precompute_transition_params, sample_and_analytic_score_target,
+    _extract_Avx_Avv_coupled_gamma, closed_form_propagator_skew, elapsed_time_at_step,
+    precompute_transition_params, sample_and_analytic_score_target, sample_and_analytic_score_target_skew,
     sample_and_analytic_score_target_spectral,
 )
+from synthetic.skew_coupling import parametrize_skew_matrix, reference_stationary_covariance
 from pde.dataset import ALL_PROBLEMS, MultiPhysicsFieldDataset, collate_fn, _get_or_create_target_norm_stats
 from pde.pde_residuals import e_flow_residual, pde_residual_metric, te_heat_normalize_mater, te_heat_residual, va_residual
 
@@ -109,6 +111,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--coupling-w-in", type=float, default=2.0)
     p.add_argument("--coupling-w-out", type=float, default=1.0)
     p.add_argument("--coupling-epsilon", type=float, default=1.0)
+    p.add_argument("--skew-coupling-family", default="none", choices=["none", "random", "te_heat_physics"],)
+    p.add_argument("--skew-coupling-scale", type=float, default=1.0)
+    p.add_argument("--skew-coupling-seed", type=int, default=0)
     p.add_argument("--alpha", default="1.0")
     p.add_argument("--beta", default="0.5")
     p.add_argument("--k-reference", type=float, default=1.0,)
@@ -187,6 +192,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
     if args.method == "csho_pairwise" and args.coupling_family == "block" and args.coupling_block_sizes is None:
         raise ValueError("--coupling-block-sizes is required when --coupling-family block")
+    if args.skew_coupling_family != "none":
+        if args.method != "csho_pairwise":
+            raise ValueError
+        if not args.constant_k:
+            raise ValueError
     if args.dt is None:
         args.dt = 1.0 / args.n_diff_steps
     return args
@@ -212,6 +222,23 @@ def _build_pde_coupling(args, method: str, N: int, device, seed: int) -> torch.T
         raise ValueError(f"Unknown coupling_family {family!r}")
     cfg = METHOD_CONFIGS[method]
     return build_coupling_matrix(N, mode=cfg["coupling_mode"], device=device)
+
+
+def _build_pde_skew(args, N: int, device) -> Optional[torch.Tensor]:
+    if args.skew_coupling_family == "none":
+        return None
+    if args.skew_coupling_family == "random":
+        gen = torch.Generator(device="cpu").manual_seed(args.skew_coupling_seed)
+        W = torch.randn(2 * N, 2 * N, generator=gen) * args.skew_coupling_scale
+        return parametrize_skew_matrix(W).to(device=device)
+    if args.skew_coupling_family == "te_heat_physics":
+        if N != 3:
+            raise ValueError
+        W = torch.zeros(2 * N, 2 * N, device=device)
+        W[0, 5] = args.skew_coupling_scale
+        W[1, 5] = args.skew_coupling_scale
+        return parametrize_skew_matrix(W)
+    raise ValueError
 
 
 def build_method_state(args, N: int, device, coupling=None, sigma_ab=None):
@@ -496,8 +523,28 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
             args.n_diff_steps, args.dt, lambda t, T: g_matrix, args.constant_k, _csho_time_scale_fn(args),
             damping_matrix=Gamma,
         )
+        skew_matrix = skew_sigma_ref = params_skew = None
+        if args.method == "csho_pairwise":
+            skew_matrix = _build_pde_skew(args, N, device)
+            if skew_matrix is not None:
+                A_vx0, _ = _extract_Avx_Avv_coupled_gamma(
+                    N, None, None, args.alpha_list, args.beta_list, args.k_reference, coupling,
+                    t=1, T=1, constant_k=True, time_scale_fn=lambda t, T: torch.tensor(1.0),
+                    damping_matrix=Gamma,
+                )
+                skew_sigma_ref = reference_stationary_covariance(-A_vx0.to(device), target_variance=1.0)
+                params_skew = [
+                    closed_form_propagator_skew(
+                        N, gamma_self, gamma_couple, args.alpha_list, args.beta_list, args.k_reference, coupling,
+                        tau_hat=elapsed_time_at_step(t_idx, args.n_diff_steps, args.dt, _csho_time_scale_fn(args)),
+                        constant_k=True, G0=g_matrix, damping_matrix=Gamma, skew_matrix=skew_matrix,
+                        target_variance=1.0,
+                    )
+                    for t_idx in range(1, args.n_diff_steps + 1)
+                ]
     else:
         gamma_self = gamma_couple = Gamma = None
+        skew_matrix = skew_sigma_ref = params_skew = None
         state = build_method_state(args, N, device)
 
     drift_detector = make_drift_detector(bucket_names=[])
@@ -530,14 +577,18 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
             orig_shape = diffuse_state[0].shape
             X_flat = torch.cat([diffuse_state[i].reshape(-1, 1) for i in range(N)], dim=-1)
             Z0 = torch.cat([X_flat, torch.zeros_like(X_flat)], dim=-1)
-            Phi_t, _ = params[t_idx - 1]
             q = elapsed_time_at_step(t_idx, args.n_diff_steps, args.dt, _csho_time_scale_fn(args))
-            if Gamma is not None:
-                Zt, score_target = sample_and_analytic_score_target_spectral(
-                    Z0, Phi_t, Gamma, coupling, q, zeta=zeta_resolved,
-                )
+            if params_skew is not None:
+                Phi_t, Sigma_t = params_skew[t_idx - 1]
+                Zt, score_target = sample_and_analytic_score_target_skew(Z0, Phi_t, Sigma_t)
             else:
-                Zt, score_target = sample_and_analytic_score_target(Z0, Phi_t, N, gamma_self, gamma_couple, q)
+                Phi_t, _ = params[t_idx - 1]
+                if Gamma is not None:
+                    Zt, score_target = sample_and_analytic_score_target_spectral(
+                        Z0, Phi_t, Gamma, coupling, q, zeta=zeta_resolved,
+                    )
+                else:
+                    Zt, score_target = sample_and_analytic_score_target(Z0, Phi_t, N, gamma_self, gamma_couple, q)
             X_t = [[Zt[:, i:i + 1].reshape(*orig_shape)] for i in range(N)]
             V_t = [[Zt[:, N + i:N + i + 1].reshape(*orig_shape)] for i in range(N)]
 
@@ -603,7 +654,7 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
 
     metrics, per_sample_rel_l2, sample_maps = evaluate(
         args, model, score_net, val_loader, device, task_names, state, gamma_self, gamma_couple, Gamma,
-        is_spatial, target_mean, target_std,
+        is_spatial, target_mean, target_std, skew_matrix=skew_matrix, skew_sigma_ref=skew_sigma_ref,
     )
     metrics["nan_events"] = float(nan_events)
     metrics["explosion_events"] = float(explosion_events)
@@ -619,6 +670,7 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
 @torch.no_grad()
 def evaluate(args, model, score_net, val_loader, device, task_names, state, gamma_self, gamma_couple, Gamma=None,
              is_spatial: bool = False, target_mean=None, target_std=None,
+             skew_matrix=None, skew_sigma_ref=None,
              ) -> Tuple[Dict[str, float], Dict[str, List[float]], Dict[str, np.ndarray]]:
     model.eval()
     score_net.eval()
@@ -658,7 +710,7 @@ def evaluate(args, model, score_net, val_loader, device, task_names, state, gamm
                     X_cur, V_cur, K_self, K_global, score_outputs, t_idx, args.n_diff_steps,
                     args.alpha_list, args.beta_list, gamma_self, gamma_couple,
                     coupling, args.constant_k, args.dt, G, time_scale_fn=_csho_time_scale_fn(args),
-                    damping_matrix=Gamma,
+                    damping_matrix=Gamma, skew_matrix=skew_matrix, skew_sigma_ref=skew_sigma_ref,
                 )
             final_latents = [X_cur[i][0] for i in range(N)]
         elif args.method == "ddpm":
