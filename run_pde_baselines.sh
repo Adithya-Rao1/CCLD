@@ -20,7 +20,7 @@ OUT_DIR="results/experiment_2_physics/${PROBLEM}_${ARCH}"
 ENCODER_DIR="${OUT_DIR}/shared_encoders"
 mkdir -p "${OUT_DIR}"
 
-echo "=== ${PROBLEM}/${ARCH}: n-epochs=${N_EPOCHS} n-diff-steps=${N_DIFF_STEPS} batch-size=${BATCH_SIZE} lr=${LR} seeds=${SEEDS} csho-tau=${CSHO_TAU} ==="
+echo "${PROBLEM}/${ARCH}: n-epochs=${N_EPOCHS} n-diff-steps=${N_DIFF_STEPS} batch-size=${BATCH_SIZE} lr=${LR} seeds=${SEEDS} csho-tau=${CSHO_TAU}"
 
 MISSING_ENCODER_SEEDS=""
 for SEED in ${SEEDS//,/ }; do
@@ -42,18 +42,18 @@ if [ -n "${MISSING_ENCODER_SEEDS}" ]; then
     --seeds "${MISSING_ENCODER_SEEDS}" \
     --lr "${LR}" \
     --num-workers "${NUM_WORKERS}" \
-    || { echo "!!! FAILED: shared encoder training -- aborting, csho/ddpm/sdm need it !!!"; exit 1; }
+    || { echo "FAILED: shared encoder training"; exit 1; }
 else
-  echo "--- shared encoders: already present for all seeds in ${ENCODER_DIR}, skipping ---"
+  echo "shared encoders: already present for all seeds in ${ENCODER_DIR}, skipping"
 fi
 
 for METHOD in csho ddpm sdm; do
   RESULT_FILE="${OUT_DIR}/${METHOD}_results.json"
   if [ -f "${RESULT_FILE}" ]; then
-    echo "--- ${METHOD}: already present at ${RESULT_FILE}, skipping ---"
+    echo "${METHOD}: already present at ${RESULT_FILE}, skipping"
     continue
   fi
-  echo "--- ${METHOD}: training ---"
+  echo "${METHOD}: training"
   python -m pde.run_experiment \
     --config pde/config.yaml \
     --data-root "${PDE_DATA_ROOT}" \
@@ -69,7 +69,7 @@ for METHOD in csho ddpm sdm; do
     --out-dir "${OUT_DIR}" \
     --frozen-encoder-dir "${ENCODER_DIR}" \
     --csho-tau "${CSHO_TAU}" \
-    || echo "!!! FAILED: ${PROBLEM}/${ARCH}/${METHOD} -- see output above, continuing with the rest !!!"
+    || echo "FAILED: ${PROBLEM}/${ARCH}/${METHOD}"
 done
 
-echo "=== Done. Results in ${OUT_DIR}/{csho,ddpm,sdm}_results.json ==="
+echo "Done. Results in ${OUT_DIR}/{csho,ddpm,sdm}_results.json"

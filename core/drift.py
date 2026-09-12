@@ -72,12 +72,12 @@ def drift_fn_n(
         norm_f_k_global = torch.as_tensor(k_global_reference, device=X[0][0].device)
 
     omega_sq = [-(norm_f_k_self[i] + norm_f_k_global) for i in range(N)]
-    m = [_mean_per_sample(X[i]) for i in range(N)]  # each m[i] has shape (B,)
+    m = [_mean_per_sample(X[i]) for i in range(N)]  
 
     target = [
         sum(coupling_matrix[i, j] * m[j] for j in range(N) if j != i)
         for i in range(N)
-    ]  # each target[i] has shape (B,)
+    ] 
 
     dV: List[List[torch.Tensor]] = []
     for i in range(N):

@@ -28,9 +28,7 @@ declare -A PDE_BATCH_SIZE=(
   [unet_model]="256"
 )
 
-echo "############################################################"
-echo "### Pre-flight: checking pde/ score-arch dependencies    ###"
-echo "############################################################"
+echo "Checking pde/ score-arch dependencies   "
 if [[ " ${ARCHES[*]} " == *" fno "* || " ${ARCHES[*]} " == *" unet_model "* ]]; then
   python -c "
 import sys
@@ -51,15 +49,11 @@ else
   echo "Skipping fno/unet_model dependency check -- not in ARCHES=(${ARCHES[*]})."
 fi
 
-echo "############################################################"
-echo "### PHASE 1: synthetic/ step-count x N=2..5 sweep         ###"
-echo "############################################################"
+echo "PHASE 1: synthetic/ step-count x N=2..5 sweep         "
 bash run_stepcount_sweep.sh "${N_SEEDS}" "${N_ITERS}" "${N_SAMPLES}"
 
-echo "############################################################"
-echo "### PHASE 2: pde/ multiphysics grid                       ###"
-echo "############################################################"
-echo "=== data-root: ${PDE_DATA_ROOT}, n-epochs: ${PDE_N_EPOCHS}, n-diff-steps: ${PDE_N_DIFF_STEPS}, seeds: ${PDE_SEEDS}, num-workers: ${PDE_NUM_WORKERS}, arches: ${ARCHES[*]} ==="
+echo "PHASE 2: pde/ multiphysics grid                       "
+echo "data-root: ${PDE_DATA_ROOT}, n-epochs: ${PDE_N_EPOCHS}, n-diff-steps: ${PDE_N_DIFF_STEPS}, seeds: ${PDE_SEEDS}, num-workers: ${PDE_NUM_WORKERS}, arches: ${ARCHES[*]}"
 
 for PROBLEM in "${PROBLEMS[@]}"; do
   for ARCH in "${ARCHES[@]}"; do
@@ -85,13 +79,11 @@ for PROBLEM in "${PROBLEMS[@]}"; do
         --lr "${PDE_LR[${ARCH}]}" \
         --num-workers "${PDE_NUM_WORKERS}" \
         --out-dir "${OUT_DIR}" \
-        || echo "!!! FAILED: ${PROBLEM} / ${METHOD} / ${ARCH} -- see output above, continuing with the rest of the grid !!!"
+        || echo "FAILED: ${PROBLEM} / ${METHOD} / ${ARCH}"
     done
   done
 done
 
-echo "############################################################"
-echo "### Done.                                                  ###"
-echo "############################################################"
-echo "=== Synthetic sweep: results/experiment_3_synthetic/stepcount_sweep_seeds${N_SEEDS}_iters${N_ITERS}/ ==="
-echo "=== PDE grid: results/experiment_2_physics/{problem}_{arch}/{method}_results.json ==="
+echo "### Done.                                                 "
+echo "Synthetic sweep: results/experiment_3_synthetic/stepcount_sweep_seeds${N_SEEDS}_iters${N_ITERS}/"
+echo "PDE grid: results/experiment_2_physics/{problem}_{arch}/{method}_results.json"

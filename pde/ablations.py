@@ -11,10 +11,6 @@ from core.stats import aggregate_over_seeds, compare_configs
 from pde import run_experiment as exp
 from pde.dataset import ALL_PROBLEMS, DIFFUSION_REACTION_METADATA, PROBLEM_SPECS
 
-# MHD's 5 native output fields (Jx, Jy, Jz, u_u, u_v) are all real-valued, so its native
-# task-name list is exactly this order with no Re{}/Im{} splitting -- a clean, monotonically
-# growing field-count sweep. (VA also has 6 native field groups, but every one of them is
-# complex, so its native task list is 12 long after Re/Im splitting -- MHD is the simpler choice.)
 FIELD_GROWTH = ["Jx", "Jy", "Jz", "u_u", "u_v"]
 
 
@@ -73,14 +69,6 @@ def _record_axis(results, significance_rows, axis, label, extra_fields, per_seed
 
 
 def sweep_n_fields(args, results, significance_rows):
-    # A task-count sweep via explicit --task-subset growth on a field-rich problem (MHD, 5
-    # native real-valued output fields) -- the exp2 analogue of image/ablations.py's
-    # sweep_n_tasks. --n-tasks is passed alongside for documentation/consistency, but
-    # --task-subset is what actually drives which fields are selected: dataset.py's
-    # MultiPhysicsFieldDataset only resolves an --n-tasks value that doesn't match the native
-    # field count via a small hardcoded TASK_SUBSETS lookup table (which doesn't cover MHD's
-    # intermediate counts), so an explicit --task-subset list is required for the sweep to work
-    # for n < native.
     baseline = [None, None]
     max_n = min(args.max_n, len(FIELD_GROWTH))
     for n in range(2, max_n + 1):
@@ -191,7 +179,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     p.add_argument("--max-n", type=int, default=len(FIELD_GROWTH))
     p.add_argument("--n-fields-problem", default="MHD")
-    p.add_argument("--default-problem", default="TE_heat", help="fixed problem used by all axes except 'problem'")
+    p.add_argument("--default-problem", default="TE_heat",)
     p.add_argument("--default-damping-regime", default="critically_damped")
     p.add_argument("--alpha-grid", default="0.5,1.0,2.0")
     p.add_argument("--beta-grid", default="0.25,0.5,1.0")

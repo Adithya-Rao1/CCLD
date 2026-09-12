@@ -10,11 +10,9 @@ cd "$REPO_ROOT"
 ARCHES=(fno unet_model)
 LRS=(0.0001 0.0003 0.001 0.003)
 
-echo "############################################################"
-echo "### LR sanity check (post closed-form/FDT recalibration) ###"
-echo "### TE_heat/csho/{fno,unet_model}                           ###"
-echo "### n_epochs=${N_EPOCHS}, seed=0, lr in {${LRS[*]}}      ###"
-echo "############################################################"
+echo "LR sanity check (post closed-form/FDT recalibration)"
+echo "TE_heat/csho/{fno,unet_model}                       "
+echo "n_epochs=${N_EPOCHS}, seed=0, lr in {${LRS[*]}}     "
 
 for ARCH in "${ARCHES[@]}"; do
   for LR in "${LRS[@]}"; do
@@ -37,9 +35,7 @@ for ARCH in "${ARCHES[@]}"; do
   done
 done
 
-echo "############################################################"
-echo "### Summary                                               ###"
-echo "############################################################"
+echo "Summary                                               "
 python -c "
 import json, os, glob
 
@@ -66,6 +62,3 @@ for arch, lr, summary in rows:
     exp = summary.get('explosion_events', {}).get('mean', float('nan'))
     print(f'{arch:10s} {lr:8s} {rez:<14.4f} {iez:<14.4f} {t:<12.6f} {exp:<10.1f}')
 "
-
-echo "=== Pick the lowest Re{Ez}_rel_l2/Im{Ez}_rel_l2 per arch (with sane explosion_events) as the ==="
-echo "=== per-arch --lr to use for run_full_paper_sweep.sh's PDE phase.                            ==="

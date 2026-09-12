@@ -38,7 +38,7 @@ def run(out_dir: str) -> None:
                 if epsilon == 0.0:
                     C = build_coupling_matrix(N, mode="mean_field")
                     if seed > 0:
-                        continue  # epsilon=0 is deterministic (always exactly mean-field)
+                        continue  # epsilon=0 --> mean-field
                 else:
                     C = random_heterogeneous_coupling(N, epsilon=epsilon, seed=2000 + seed)
                 L = torch.eye(N, dtype=C.dtype) - C

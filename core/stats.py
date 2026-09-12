@@ -42,7 +42,7 @@ def paired_significance(
     values_a: List[float], values_b: List[float], alternative: str = "two-sided"
 ) -> Dict[str, float]:
     if len(values_a) != len(values_b):
-        raise ValueError("paired_significance requires equal-length seed-matched lists")
+        raise ValueError
     if len(values_a) < 2:
         return {"statistic": float("nan"), "p_value": float("nan"), "n": len(values_a)}
     diffs = np.array(values_a) - np.array(values_b)

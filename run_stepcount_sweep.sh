@@ -10,9 +10,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
 
 for STEPS in "${STEP_COUNTS[@]}"; do
-  echo "############################################"
-  echo "### n_diff_steps=${STEPS} ###"
-  echo "############################################"
+  echo "n_diff_steps=${STEPS}"
   bash run_final_synthetic_experiments.sh "${N_SEEDS}" "${N_ITERS}" "${N_SAMPLES}" "${STEPS}"
 done
 
@@ -24,4 +22,4 @@ python -m synthetic.aggregate_stepcount_sweep \
   --step-counts "${STEP_COUNTS_CSV}" \
   --out-dir "${SWEEP_OUT_DIR}"
 
-echo "=== Combined step-count comparison written to ${SWEEP_OUT_DIR}/ ==="
+echo "Combined step-count comparison written to ${SWEEP_OUT_DIR}/"

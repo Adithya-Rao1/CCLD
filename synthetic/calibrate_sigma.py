@@ -16,8 +16,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--n-sweep", default="2,3,4,5", help="comma-separated N values")
     p.add_argument("--beta", type=float, default=0.5)
-    p.add_argument("--target-variance", type=float, default=1.0,
-                    help="target stationary velocity variance for both modes (Dockhorn et al. convention = 1.0)")
+    p.add_argument("--target-variance", type=float, default=1.0,)
     return p.parse_args(argv)
 
 

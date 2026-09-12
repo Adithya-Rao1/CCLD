@@ -72,9 +72,7 @@ def main():
     if overlap:
         print(
             f"\nWARNING: inside range [{inside_min:.6g}, {inside_max:.6g}] and outside range "
-            f"[{outside_min:.6g}, {outside_max:.6g}] overlap across the dataset, unlike the "
-            f"single sample checked locally. The piecewise normalization in "
-            f"te_heat_normalize_mater assumes clean separation; investigate before trusting it."
+            f"[{outside_min:.6g}, {outside_max:.6g}] overlap across the dataset"
         )
 
 if __name__ == "__main__":
