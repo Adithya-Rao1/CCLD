@@ -10,6 +10,8 @@ import synthetic.pairwise_n_sweep as pns
 from core.coupling import build_coupling_matrix
 from core.reporting import write_csv
 from core.stats import aggregate_over_seeds, compare_configs
+from synthetic.drift_coupled_gamma import calibrate_coupled_gammas_spectral
+from synthetic.exact_dsm import _extract_Avx_Avv_coupled_gamma
 from synthetic.ground_truth_sde import make_directional_ground_truth
 from synthetic.metrics import fit_gaussian
 from synthetic.skew_coupling import parametrize_skew_matrix
@@ -19,7 +21,7 @@ COUPLING_STRENGTH = 0.6
 LAG_DELTA = 0.5
 SKEW_SCALE = 1.0
 SEEDS = [0, 1, 2, 3, 4]
-N_TRAIN_ITERS = 2000
+N_TRAIN_ITERS_SWEEP = [100, 300, 1000, 2000]
 N_SAMPLES = 4000
 N_DIFF_STEPS = 32
 SAMPLER = "euler"
@@ -32,18 +34,31 @@ def build_generic_skew(N_eff: int, seed: int, device, scale: float = SKEW_SCALE)
     return parametrize_skew_matrix(W).to(device)
 
 
-def build_structured_skew(gt, device, scale: float = SKEW_SCALE) -> torch.Tensor:
+def build_structured_skew(gt, coupling: torch.Tensor, device, scale: float = SKEW_SCALE) -> torch.Tensor:
     N_orig, N_eff = gt.N_orig, gt.N
     theta = gt.theta.to(device)
     theta_antisym = theta - theta.T
-    theta_sym = (theta + theta.T) / 2  
-    W = torch.zeros(2 * N_eff, 2 * N_eff, device=device)
+
+    Gamma = calibrate_coupled_gammas_spectral(
+        pns.ALPHA_V, pns.BETA, pns.K_REFERENCE, pns.K_REFERENCE, coupling, target_zeta=pns.TARGET_ZETA,
+    )
+    A_vx0, _ = _extract_Avx_Avv_coupled_gamma(
+        N_eff, None, None, [pns.ALPHA_V] * N_eff, [pns.BETA] * N_eff, pns.K_REFERENCE, coupling,
+        t=1, T=1, constant_k=True, time_scale_fn=lambda t, T: torch.tensor(1.0), damping_matrix=Gamma,
+    )
+    K = -A_vx0
+
+    pop_a, pop_b = slice(0, N_orig), slice(N_orig, N_eff)
+    K_cross = K[pop_a, pop_b]
+    Gamma_cross = Gamma[pop_a, pop_b]
+
     X_orig, X_lag = slice(0, N_orig), slice(N_orig, N_eff)
     V_orig, V_lag = slice(N_eff, N_eff + N_orig), slice(N_eff + N_orig, 2 * N_eff)
+    W = torch.zeros(2 * N_eff, 2 * N_eff, device=device)
     W[X_orig, X_lag] = theta_antisym * scale  # XX
-    W[X_orig, V_lag] = (theta_sym @ theta_antisym) * scale  # XV
-    W[V_orig, X_lag] = (theta_antisym @ theta_sym) * scale  # VX
-    W[V_orig, V_lag] = (theta_sym @ theta_antisym @ theta_sym) * scale  # VV
+    W[X_orig, V_lag] = (theta_antisym * K_cross) * scale  # XV
+    W[V_orig, X_lag] = (theta_antisym * K_cross) * scale  # VX
+    W[V_orig, V_lag] = (theta_antisym * Gamma_cross) * scale  # VV
     return parametrize_skew_matrix(W)
 
 
@@ -67,7 +82,6 @@ def cross_block_asymmetry_metrics(generated: torch.Tensor, gt) -> Dict[str, floa
 
 def run() -> List[Dict]:
     os.makedirs(OUT_DIR, exist_ok=True)
-    pns.N_TRAIN_ITERS = N_TRAIN_ITERS
     pns.N_SAMPLES = N_SAMPLES
     pns.N_DIFF_STEPS = N_DIFF_STEPS
     pns.DT = 1.0 / N_DIFF_STEPS
@@ -84,62 +98,64 @@ def run() -> List[Dict]:
         conditions: List[Tuple[str, torch.Tensor]] = [
             ("symmetric_only", None),
             ("skew_generic", build_generic_skew(N_eff, seed=0, device=device)),
-            ("skew_structured", build_structured_skew(gt, device)),
+            ("skew_structured", build_structured_skew(gt, coupling, device)),
         ]
 
-        per_seed_by_condition: Dict[str, Dict[int, Dict[str, float]]] = {}
-        for label, skew_matrix in conditions:
-            print(f"\nN_orig={N_orig} (N_eff={N_eff}) condition={label}")
-            per_seed = {}
-            for seed in SEEDS:
-                metrics, generated = pns.train_one_seed(
-                    N_eff, coupling, seed, label=f"dir/{label}", skew_matrix=skew_matrix,
-                    gt=gt, return_samples=True, sampler=SAMPLER,
-                )
-                metrics.update(cross_block_asymmetry_metrics(generated, gt))
-                per_seed[seed] = metrics
-                per_seed_rows.append({"N_orig": N_orig, "condition": label, "seed": seed, **metrics})
-                print(f"  seed={seed}: kl={metrics['kl_divergence']:.4f} "
-                      f"cross_asym_recovery_pct={metrics['cross_asym_recovery_pct']:.1f} "
-                      f"cross_asym_mae={metrics['cross_asym_mae']:.4f}")
-            per_seed_by_condition[label] = per_seed
+        for n_train_iters in N_TRAIN_ITERS_SWEEP:
+            pns.N_TRAIN_ITERS = n_train_iters
+            per_seed_by_condition: Dict[str, Dict[int, Dict[str, float]]] = {}
+            for label, skew_matrix in conditions:
+                print(f"\nN_orig={N_orig} (N_eff={N_eff}) n_train_iters={n_train_iters} condition={label}")
+                per_seed = {}
+                for seed in SEEDS:
+                    metrics, generated = pns.train_one_seed(
+                        N_eff, coupling, seed, label=f"dir/{label}/iters{n_train_iters}", skew_matrix=skew_matrix,
+                        gt=gt, return_samples=True, sampler=SAMPLER,
+                    )
+                    metrics.update(cross_block_asymmetry_metrics(generated, gt))
+                    per_seed[seed] = metrics
+                    per_seed_rows.append({"N_orig": N_orig, "n_train_iters": n_train_iters, "condition": label, "seed": seed, **metrics})
+                    print(f"  seed={seed}: kl={metrics['kl_divergence']:.4f} "
+                          f"cross_asym_recovery_pct={metrics['cross_asym_recovery_pct']:.1f} "
+                          f"cross_asym_mae={metrics['cross_asym_mae']:.4f}")
+                per_seed_by_condition[label] = per_seed
 
-            cond_summary = aggregate_over_seeds(per_seed)
-            summary_rows.append({
-                "N_orig": N_orig, "condition": label,
-                "kl_mean": cond_summary["kl_divergence"]["mean"], "kl_std": cond_summary["kl_divergence"]["std"],
-                "cross_asym_recovery_pct_mean": cond_summary["cross_asym_recovery_pct"]["mean"],
-                "cross_asym_recovery_pct_std": cond_summary["cross_asym_recovery_pct"]["std"],
-                "cross_asym_mae_mean": cond_summary["cross_asym_mae"]["mean"],
-                "cross_asym_mae_std": cond_summary["cross_asym_mae"]["std"],
-            })
+                cond_summary = aggregate_over_seeds(per_seed)
+                summary_rows.append({
+                    "N_orig": N_orig, "n_train_iters": n_train_iters, "condition": label,
+                    "kl_mean": cond_summary["kl_divergence"]["mean"], "kl_std": cond_summary["kl_divergence"]["std"],
+                    "cross_asym_recovery_pct_mean": cond_summary["cross_asym_recovery_pct"]["mean"],
+                    "cross_asym_recovery_pct_std": cond_summary["cross_asym_recovery_pct"]["std"],
+                    "cross_asym_mae_mean": cond_summary["cross_asym_mae"]["mean"],
+                    "cross_asym_mae_std": cond_summary["cross_asym_mae"]["std"],
+                })
 
-        baseline_per_seed = per_seed_by_condition["symmetric_only"]
-        sig_metric_names = ["kl_divergence", "cross_asym_mae", "cross_asym_recovery_pct"]
-        for label, per_seed in per_seed_by_condition.items():
-            if label == "symmetric_only":
-                continue
-            sig = compare_configs(baseline_per_seed, per_seed, metric_names=sig_metric_names)
-            for metric, s in sig.items():
-                sig_rows.append({"N_orig": N_orig, "comparison": f"{label}_vs_symmetric_only", "metric": metric, **s})
+            baseline_per_seed = per_seed_by_condition["symmetric_only"]
+            sig_metric_names = ["kl_divergence", "cross_asym_mae", "cross_asym_recovery_pct"]
+            for label, per_seed in per_seed_by_condition.items():
+                if label == "symmetric_only":
+                    continue
+                sig = compare_configs(baseline_per_seed, per_seed, metric_names=sig_metric_names)
+                for metric, s in sig.items():
+                    sig_rows.append({"N_orig": N_orig, "n_train_iters": n_train_iters, "comparison": f"{label}_vs_symmetric_only", "metric": metric, **s})
 
     write_csv(per_seed_rows, os.path.join(OUT_DIR, "directional_recovery_per_seed.csv"))
     write_csv(summary_rows, os.path.join(OUT_DIR, "directional_recovery_summary.csv"))
     write_csv(sig_rows, os.path.join(OUT_DIR, "directional_recovery_significance.csv"))
 
-    print("\n\nSUMMARY: symmetric_only vs skew_generic vs skew_structured, directional ground truth")
-    print(f"{'N_orig':>6} {'condition':>16} {'KL':>10} {'asym_recovery%':>16} {'asym_mae':>10}")
+    print("\n\nSUMMARY: symmetric_only vs skew_generic vs skew_structured, KL vs training budget")
+    print(f"{'N_orig':>6} {'iters':>6} {'condition':>16} {'KL':>10} {'asym_recovery%':>16} {'asym_mae':>10}")
     for row in summary_rows:
-        print(f"{row['N_orig']:>6} {row['condition']:>16} {row['kl_mean']:>10.4f} "
+        print(f"{row['N_orig']:>6} {row['n_train_iters']:>6} {row['condition']:>16} {row['kl_mean']:>10.4f} "
               f"{row['cross_asym_recovery_pct_mean']:>16.1f} {row['cross_asym_mae_mean']:>10.4f}")
     print(f"\nWrote results to {OUT_DIR}/")
     return summary_rows
 
 
 def parse_args(argv=None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Directional (asymmetric-theta) ground-truth recovery: symmetric-only vs skew-augmented CCLD")
+    p = argparse.ArgumentParser(description="Directional (asymmetric-theta) ground-truth recovery vs training budget: symmetric-only vs skew-augmented CCLD")
     p.add_argument("--seeds", default="0,1,2,3,4")
-    p.add_argument("--n-train-iters", type=int, default=2000)
+    p.add_argument("--n-train-iters-sweep", default="100,300,1000,2000")
     p.add_argument("--n-samples", type=int, default=4000)
     p.add_argument("--n-orig-sweep", default="2,3,4")
     p.add_argument("--n-diff-steps", type=int, default=32)
@@ -154,7 +170,7 @@ def parse_args(argv=None) -> argparse.Namespace:
 if __name__ == "__main__":
     _args = parse_args()
     SEEDS = [int(s) for s in _args.seeds.split(",") if s.strip()]
-    N_TRAIN_ITERS = _args.n_train_iters
+    N_TRAIN_ITERS_SWEEP = [int(s) for s in _args.n_train_iters_sweep.split(",") if s.strip()]
     N_SAMPLES = _args.n_samples
     N_ORIG_SWEEP = [int(n) for n in _args.n_orig_sweep.split(",") if n.strip()]
     N_DIFF_STEPS = _args.n_diff_steps
@@ -164,7 +180,7 @@ if __name__ == "__main__":
     OUT_DIR = _args.out_dir
     if _args.quick:
         SEEDS = [0]
-        N_TRAIN_ITERS = 20
+        N_TRAIN_ITERS_SWEEP = [10, 20]
         N_SAMPLES = 128
         N_ORIG_SWEEP = [2, 3]
         N_DIFF_STEPS = 8
