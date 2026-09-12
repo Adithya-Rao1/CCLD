@@ -62,10 +62,10 @@ for PROBLEM in "${PROBLEMS[@]}"; do
     for METHOD in "${METHODS[@]}"; do
       RESULT_FILE="${OUT_DIR}/${METHOD}_results.json"
       if [ -f "${RESULT_FILE}" ]; then
-        echo "--- ${PROBLEM} / ${METHOD} / ${ARCH}: already present at ${RESULT_FILE}, skipping ---"
+        echo "${PROBLEM} / ${METHOD} / ${ARCH}: already present at ${RESULT_FILE}, skipping"
         continue
       fi
-      echo "--- ${PROBLEM} / ${METHOD} / ${ARCH}: training (lr=${PDE_LR[${ARCH}]}, batch-size=${PDE_BATCH_SIZE[${ARCH}]}) ---"
+      echo "${PROBLEM} / ${METHOD} / ${ARCH}: training (lr=${PDE_LR[${ARCH}]}, batch-size=${PDE_BATCH_SIZE[${ARCH}]})"
       python -m pde.run_experiment \
         --config pde/config.yaml \
         --data-root "${PDE_DATA_ROOT}" \

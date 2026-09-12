@@ -29,7 +29,7 @@ for SEED in ${SEEDS//,/ }; do
   fi
 done
 if [ -n "${MISSING_ENCODER_SEEDS}" ]; then
-  echo "--- shared encoders: training seeds ${MISSING_ENCODER_SEEDS} ---"
+  echo "shared encoders: training seeds ${MISSING_ENCODER_SEEDS}"
   python -m pde.run_experiment \
     --config pde/config.yaml \
     --data-root "${PDE_DATA_ROOT}" \
