@@ -36,7 +36,7 @@ def build_structured_skew(gt, device, scale: float = SKEW_SCALE) -> torch.Tensor
     N_orig, N_eff = gt.N_orig, gt.N
     theta_antisym = (gt.theta - gt.theta.T).to(device)
     W = torch.zeros(2 * N_eff, 2 * N_eff, device=device)
-    W[:N_orig, N_eff + N_orig:N_eff + 2 * N_orig] = theta_antisym * scale
+    W[:N_orig, N_orig:N_eff] = theta_antisym * scale
     return parametrize_skew_matrix(W)
 
 
