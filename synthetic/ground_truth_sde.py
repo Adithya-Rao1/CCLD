@@ -116,6 +116,28 @@ def make_ground_truth_from_coupling(
     return GroundTruthCoupledOU(theta, sigma_gt)
 
 
+def make_asymmetric_ground_truth(
+    N: int,
+    coupling_strength: float = 0.5,
+    seed: int = 0,
+    base_decay: float = 1.0,
+    sigma_scale: float = 1.0,
+    device=None,
+    dtype: torch.dtype = torch.float32,
+) -> GroundTruthCoupledOU:
+    if N < 2 or not (0.0 <= coupling_strength < 1.0):
+        raise ValueError
+
+    g = torch.Generator().manual_seed(seed)
+    w = torch.rand((N, N), generator=g, dtype=dtype)
+    row_sum = w.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+    w = w / row_sum
+
+    theta = (base_decay * torch.eye(N, dtype=dtype) - coupling_strength * base_decay * w).to(device=device)
+    sigma_gt = (sigma_scale * torch.eye(N, dtype=dtype)).to(device=device)
+    return GroundTruthCoupledOU(theta, sigma_gt)
+
+
 def make_directional_ground_truth(
     N: int,
     coupling_strength: float = 0.5,

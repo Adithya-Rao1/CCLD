@@ -8,7 +8,7 @@ import torch
 from core.coupling import build_coupling_matrix
 from core.drift import _time_scale
 from synthetic.drift_coupled_gamma import antisymmetric_mode_damping, calibrate_sigma_fdt, drift_fn_coupled_gamma
-from synthetic.skew_coupling import inject_skew_coupling, reference_stationary_covariance
+from synthetic.skew_coupling import inject_skew_coupling, inject_skew_coupling_additive, reference_stationary_covariance
 
 _DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 
@@ -571,6 +571,106 @@ def exact_reverse_step_matrices(
         K = -A_vx0
         Sigma_ref = reference_stationary_covariance(K, target_variance)
         A0_block = inject_skew_coupling(A0_block, Sigma_ref, skew_matrix.to(dtype).to(device))
+
+    A_rev = -A0_block
+
+    L = torch.zeros(2 * N, N, dtype=dtype, device=device)
+    L[N:, :] = G0.to(dtype).to(device) if G0 is not None else sigma_ref * torch.eye(N, dtype=dtype, device=device)
+    LLT = L @ L.T
+
+    M = torch.zeros(6 * N, 6 * N, dtype=dtype, device=device)
+    M[:2 * N, :2 * N] = A_rev
+    M[:2 * N, 2 * N:4 * N] = LLT
+    M[:2 * N, 4 * N:6 * N] = torch.eye(2 * N, dtype=dtype, device=device)
+    M[2 * N:4 * N, 2 * N:4 * N] = -A_rev.T
+
+    max_real_eig = torch.linalg.eigvals(A_rev).real.abs().max().item()
+    if tau_hat * max_real_eig > 600.0:
+        raise OverflowError
+
+    Mexp = torch.matrix_exp(tau_hat * M)
+    Phi_rev = Mexp[:2 * N, :2 * N]
+    Phi_Sigma = Mexp[:2 * N, 2 * N:4 * N]
+    Sigma_rev = Phi_Sigma @ Phi_rev.T
+    Psi_rev = Mexp[:2 * N, 4 * N:6 * N]
+    return Phi_rev, Sigma_rev, Psi_rev
+
+
+def closed_form_propagator_skew_additive(
+    N: int, gamma_self: Optional[float], gamma_couple: Optional[float], alpha: List[float], beta: List[float],
+    k_reference: float, coupling: Optional[torch.Tensor], tau_hat: float,
+    constant_k: bool = False, sigma_ref: float = 1.0, dtype=torch.float32,
+    G0: Optional[torch.Tensor] = None,
+    damping_matrix: Optional[torch.Tensor] = None,
+    skew_matrix: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    if not constant_k:
+        raise ValueError
+    const_one = lambda t, T: torch.tensor(1.0)
+    A_vx0, A_vv0 = _extract_Avx_Avv_coupled_gamma(
+        N, gamma_self, gamma_couple, alpha, beta, k_reference, coupling,
+        t=1, T=1, constant_k=constant_k, time_scale_fn=const_one,
+        damping_matrix=damping_matrix,
+    )
+    A_vx0 = A_vx0.to(dtype)
+    A_vv0 = A_vv0.to(dtype)
+    device = A_vx0.device
+
+    A0_block = torch.zeros(2 * N, 2 * N, dtype=dtype, device=device)
+    A0_block[:N, N:] = torch.eye(N, dtype=dtype, device=device)
+    A0_block[N:, :N] = A_vx0
+    A0_block[N:, N:] = A_vv0
+
+    if skew_matrix is not None:
+        A0_block = inject_skew_coupling_additive(A0_block, skew_matrix.to(dtype).to(device))
+
+    L = torch.zeros(2 * N, N, dtype=dtype, device=device)
+    L[N:, :] = G0.to(dtype).to(device) if G0 is not None else sigma_ref * torch.eye(N, dtype=dtype, device=device)
+    LLT = L @ L.T
+
+    M = torch.zeros(4 * N, 4 * N, dtype=dtype, device=device)
+    M[:2 * N, :2 * N] = A0_block
+    M[:2 * N, 2 * N:] = LLT
+    M[2 * N:, 2 * N:] = -A0_block.T
+
+    max_real_eig = torch.linalg.eigvals(A0_block).real.abs().max().item()
+    if tau_hat * max_real_eig > 600.0:
+        raise OverflowError
+
+    Mexp = torch.matrix_exp(tau_hat * M)
+    Phi = Mexp[:2 * N, :2 * N]
+    Phi_Sigma = Mexp[:2 * N, 2 * N:]
+    Sigma = Phi_Sigma @ Phi.T
+    return Phi, Sigma
+
+
+def exact_reverse_step_matrices_additive(
+    N: int, gamma_self: Optional[float], gamma_couple: Optional[float], alpha: List[float], beta: List[float],
+    k_reference: float, coupling: Optional[torch.Tensor], tau_hat: float,
+    constant_k: bool = False, sigma_ref: float = 1.0, dtype=torch.float32,
+    G0: Optional[torch.Tensor] = None,
+    damping_matrix: Optional[torch.Tensor] = None,
+    skew_matrix: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if not constant_k:
+        raise ValueError
+    const_one = lambda t, T: torch.tensor(1.0)
+    A_vx0, A_vv0 = _extract_Avx_Avv_coupled_gamma(
+        N, gamma_self, gamma_couple, alpha, beta, k_reference, coupling,
+        t=1, T=1, constant_k=constant_k, time_scale_fn=const_one,
+        damping_matrix=damping_matrix,
+    )
+    A_vx0 = A_vx0.to(dtype)
+    A_vv0 = A_vv0.to(dtype)
+    device = A_vx0.device
+
+    A0_block = torch.zeros(2 * N, 2 * N, dtype=dtype, device=device)
+    A0_block[:N, N:] = torch.eye(N, dtype=dtype, device=device)
+    A0_block[N:, :N] = A_vx0
+    A0_block[N:, N:] = A_vv0
+
+    if skew_matrix is not None:
+        A0_block = inject_skew_coupling_additive(A0_block, skew_matrix.to(dtype).to(device))
 
     A_rev = -A0_block
 
