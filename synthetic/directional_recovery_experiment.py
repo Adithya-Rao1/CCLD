@@ -82,7 +82,7 @@ def run() -> List[Dict]:
 
         per_seed_by_condition: Dict[str, Dict[int, Dict[str, float]]] = {}
         for label, skew_matrix in conditions:
-            print(f"\n=== N_orig={N_orig} (N_eff={N_eff}) condition={label} ===")
+            print(f"\nN_orig={N_orig} (N_eff={N_eff}) condition={label}")
             per_seed = {}
             for seed in SEEDS:
                 metrics, generated = pns.train_one_seed(
@@ -120,7 +120,7 @@ def run() -> List[Dict]:
     write_csv(summary_rows, os.path.join(OUT_DIR, "directional_recovery_summary.csv"))
     write_csv(sig_rows, os.path.join(OUT_DIR, "directional_recovery_significance.csv"))
 
-    print("\n\n=== SUMMARY: symmetric_only vs skew_generic vs skew_structured, directional ground truth ===")
+    print("\n\nSUMMARY: symmetric_only vs skew_generic vs skew_structured, directional ground truth")
     print(f"{'N_orig':>6} {'condition':>16} {'KL':>10} {'asym_recovery%':>16} {'asym_mae':>10}")
     for row in summary_rows:
         print(f"{row['N_orig']:>6} {row['condition']:>16} {row['kl_mean']:>10.4f} "
