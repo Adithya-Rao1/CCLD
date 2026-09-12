@@ -22,7 +22,7 @@ from synthetic.run_experiment import CoupledScoreNet
 N_SWEEP = [2, 3, 4]
 COUPLING_STRENGTH = 0.6
 SKEW_SCALE = 1.0
-SCALE_SWEEP = [0.0, 0.5, 1.0, 2.0, 4.0]
+SCALE_SWEEP = [0.0, 0.5, 1.0, 2.0, 4.0, 10.0]
 SEEDS = [0, 1, 2, 3, 4]
 N_TRAIN_ITERS = 2000
 EVAL_EVERY = 100
