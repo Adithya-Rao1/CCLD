@@ -97,8 +97,8 @@ def run() -> List[Dict]:
 
         conditions: List[Tuple[str, torch.Tensor]] = [
             ("symmetric_only", None),
-            ("skew_generic", build_generic_skew(N_eff, seed=0, device=device)),
-            ("skew_structured", build_structured_skew(gt, coupling, device)),
+            ("skew_generic", build_generic_skew(N_eff, seed=0, device=device, scale=SKEW_SCALE)),
+            ("skew_structured", build_structured_skew(gt, coupling, device, scale=SKEW_SCALE)),
         ]
 
         for n_train_iters in N_TRAIN_ITERS_SWEEP:
