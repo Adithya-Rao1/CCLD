@@ -84,6 +84,6 @@ for PROBLEM in "${PROBLEMS[@]}"; do
   done
 done
 
-echo "### Done.                                                 "
+echo "Done.                                                 "
 echo "Synthetic sweep: results/experiment_3_synthetic/stepcount_sweep_seeds${N_SEEDS}_iters${N_ITERS}/"
 echo "PDE grid: results/experiment_2_physics/{problem}_{arch}/{method}_results.json"
