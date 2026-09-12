@@ -8,13 +8,14 @@ import torch
 from tqdm import tqdm
 
 from core.coupling import block_coupling, build_coupling_matrix, random_heterogeneous_coupling
+from core.drift import _time_scale
 from core.reporting import write_csv, write_json
 from core.sde import build_g_matrix_n
 from core.stats import aggregate_over_seeds, compare_configs
 from synthetic.anderson_sde import anderson_em_step_coupled_gamma, anderson_reverse_step_coupled_gamma
 from synthetic.drift_coupled_gamma import calibrate_coupled_gammas_spectral, calibrate_sigma_fdt_spectral
 from synthetic.exact_dsm import (
-    _extract_Avx_Avv_coupled_gamma, closed_form_propagator_skew, elapsed_time_at_step,
+    _extract_Avx_Avv_coupled_gamma, closed_form_propagator_skew, elapsed_time_at_step, exact_reverse_step_matrices,
     precompute_transition_params, sample_and_analytic_score_target_skew, sample_and_analytic_score_target_spectral,
 )
 from synthetic.ground_truth_sde import GroundTruthCoupledOU, make_ground_truth_from_coupling
@@ -179,9 +180,53 @@ def sample_ccld_anderson(
     return torch.cat([X[i][0] for i in range(N)], dim=-1)
 
 
+@torch.no_grad()
+def sample_ccld_anderson_exact(
+    N: int, coupling: torch.Tensor, score_net, Gamma, G0, prior_std, device, desc: str = "",
+    skew_matrix=None,
+):
+    K_self, K_global = _make_conditioning(N, N_SAMPLES, K_REFERENCE, device)
+    prior_std_x, prior_std_v = prior_std
+    X = [[prior_std_x[i] * torch.randn(N_SAMPLES, 1, device=device)] for i in range(N)]
+    V = [[prior_std_v[i] * torch.randn(N_SAMPLES, 1, device=device)] for i in range(N)]
+    Sigma_diff = G0 @ G0.T
+
+    pbar = tqdm(total=N_DIFF_STEPS, desc=desc or f"[N={N}] sample-exact")
+    for t_idx in reversed(range(1, N_DIFF_STEPS + 1)):
+        score_outputs = score_net(X, V, t_idx)
+        time_scale = _time_scale(torch.as_tensor(float(t_idx)), N_DIFF_STEPS, TIME_SCALE_FN)
+        tau_hat_step = float(time_scale.clamp_min(0).item()) * DT
+
+        Phi_rev, Sigma_rev, Psi_rev = exact_reverse_step_matrices(
+            N, None, None, [ALPHA_V] * N, [BETA] * N, K_REFERENCE, coupling,
+            tau_hat=tau_hat_step, constant_k=True, G0=G0, damping_matrix=Gamma,
+            skew_matrix=skew_matrix, target_variance=1.0,
+        )
+
+        Z = torch.cat([torch.cat([X[i][0] for i in range(N)], dim=-1),
+                       torch.cat([V[i][0] for i in range(N)], dim=-1)], dim=-1)
+        score_vec = torch.cat([score_outputs[i][0] for i in range(N)], dim=-1)
+        b_v = score_vec @ Sigma_diff.T
+        b = torch.cat([torch.zeros(N_SAMPLES, N, device=device), b_v], dim=-1)
+
+        mean_new = Z @ Phi_rev.T + b @ Psi_rev.T
+        scale = Sigma_rev.diagonal().abs().max().clamp_min(1.0)
+        Sigma_reg = Sigma_rev + 1e-6 * scale * torch.eye(2 * N, device=device, dtype=Sigma_rev.dtype)
+        L_chol = torch.linalg.cholesky(Sigma_reg)
+        eps = torch.randn(N_SAMPLES, 2 * N, device=device)
+        Z_new = mean_new + eps @ L_chol.T
+
+        X = [[Z_new[:, i:i + 1]] for i in range(N)]
+        V = [[Z_new[:, N + i:N + i + 1]] for i in range(N)]
+        pbar.set_postfix(t_idx=t_idx, x_std=f"{X[0][0].std().item():.3f}")
+        pbar.update(1)
+    pbar.close()
+    return torch.cat([X[i][0] for i in range(N)], dim=-1)
+
+
 def train_one_seed(
     N: int, coupling: torch.Tensor, seed: int, label: str = "", skew_matrix=None,
-    gt=None, return_samples: bool = False,
+    gt=None, return_samples: bool = False, sampler: str = "euler",
 ):
     torch.manual_seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -192,10 +237,16 @@ def train_one_seed(
     score_net, Gamma, G0, prior_std, skew_sigma_ref = train_ccld_pairwise(
         N, coupling, gt, device, desc=f"{tag} train", skew_matrix=skew_matrix_dev,
     )
-    generated = sample_ccld_anderson(
-        N, coupling, score_net, Gamma, G0, prior_std, device, desc=f"{tag} sample",
-        skew_matrix=skew_matrix_dev, skew_sigma_ref=skew_sigma_ref,
-    )
+    if sampler == "exact":
+        generated = sample_ccld_anderson_exact(
+            N, coupling, score_net, Gamma, G0, prior_std, device, desc=f"{tag} sample-exact",
+            skew_matrix=skew_matrix_dev,
+        )
+    else:
+        generated = sample_ccld_anderson(
+            N, coupling, score_net, Gamma, G0, prior_std, device, desc=f"{tag} sample",
+            skew_matrix=skew_matrix_dev, skew_sigma_ref=skew_sigma_ref,
+        )
     metrics = evaluate_sampling_quality(generated, gt)
     if return_samples:
         return metrics, generated

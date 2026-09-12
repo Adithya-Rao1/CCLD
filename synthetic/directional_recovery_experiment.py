@@ -22,6 +22,7 @@ SEEDS = [0, 1, 2, 3, 4]
 N_TRAIN_ITERS = 2000
 N_SAMPLES = 4000
 N_DIFF_STEPS = 32
+SAMPLER = "euler"
 OUT_DIR = "results/experiment_3_synthetic/directional_recovery"
 
 
@@ -86,7 +87,7 @@ def run() -> List[Dict]:
             for seed in SEEDS:
                 metrics, generated = pns.train_one_seed(
                     N_eff, coupling, seed, label=f"dir/{label}", skew_matrix=skew_matrix,
-                    gt=gt, return_samples=True,
+                    gt=gt, return_samples=True, sampler=SAMPLER,
                 )
                 metrics.update(cross_block_asymmetry_metrics(generated, gt))
                 per_seed[seed] = metrics
@@ -137,6 +138,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--n-diff-steps", type=int, default=32)
     p.add_argument("--skew-scale", type=float, default=1.0)
     p.add_argument("--lag-delta", type=float, default=0.5)
+    p.add_argument("--sampler", default="euler", choices=["euler", "exact"])
     p.add_argument("--out-dir", default="results/experiment_3_synthetic/directional_recovery")
     p.add_argument("--quick", action="store_true", help="tiny scale for smoke-testing the pipeline end-to-end")
     return p.parse_args(argv)
@@ -151,6 +153,7 @@ if __name__ == "__main__":
     N_DIFF_STEPS = _args.n_diff_steps
     SKEW_SCALE = _args.skew_scale
     LAG_DELTA = _args.lag_delta
+    SAMPLER = _args.sampler
     OUT_DIR = _args.out_dir
     if _args.quick:
         SEEDS = [0]
