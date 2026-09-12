@@ -4,7 +4,7 @@ set -uo pipefail
 N_SEEDS="${1:-20}"
 N_ITERS="${2:-10000}"
 N_SAMPLES="${3:-40000}"
-PDE_DATA_ROOT="${4:-/home/ubuntu/metis-v1-storage/CSHM-data/multiphysics}"
+PDE_DATA_ROOT="${4:-${PDE_DATA_ROOT:-pde/multiphysics-bench}}"
 PDE_N_EPOCHS="${5:-150}"
 PDE_N_DIFF_STEPS="${6:-32}"
 PDE_SEEDS="${7:-0,1,2,3,4,5,6,7,8,9}"
@@ -15,7 +15,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
 
 PROBLEMS=(TE_heat)
-METHODS=(csho ddpm sdm)
+METHODS=(ccld ddpm sdm)
 IFS=',' read -ra ARCHES <<< "${PDE_ARCHES}"
 declare -A PDE_LR=(
   [attention]="0.01"

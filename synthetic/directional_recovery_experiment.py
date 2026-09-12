@@ -129,7 +129,7 @@ def run() -> List[Dict]:
 
 
 def parse_args(argv=None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Directional (asymmetric-theta) ground-truth recovery: symmetric-only vs skew-augmented CSHO")
+    p = argparse.ArgumentParser(description="Directional (asymmetric-theta) ground-truth recovery: symmetric-only vs skew-augmented CCLD")
     p.add_argument("--seeds", default="0,1,2,3,4")
     p.add_argument("--n-train-iters", type=int, default=2000)
     p.add_argument("--n-samples", type=int, default=4000)

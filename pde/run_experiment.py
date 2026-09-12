@@ -56,11 +56,11 @@ from pde.unet_model_score_net import (
 )
 
 METHOD_CONFIGS = {
-    "csho": {"coupling_mode": "mean_field", "diffusion_mode": "shared"},
-    "csho_independent": {"coupling_mode": "independent", "diffusion_mode": "shared"},
-    "csho_shared_g": {"coupling_mode": "mean_field", "diffusion_mode": "shared"},
-    "csho_independent_g": {"coupling_mode": "mean_field", "diffusion_mode": "independent"},
-    "csho_pairwise": {"coupling_mode": "pairwise", "diffusion_mode": "shared"},
+    "ccld": {"coupling_mode": "mean_field", "diffusion_mode": "shared"},
+    "ccld_independent": {"coupling_mode": "independent", "diffusion_mode": "shared"},
+    "ccld_shared_g": {"coupling_mode": "mean_field", "diffusion_mode": "shared"},
+    "ccld_independent_g": {"coupling_mode": "mean_field", "diffusion_mode": "independent"},
+    "ccld_pairwise": {"coupling_mode": "pairwise", "diffusion_mode": "shared"},
 }
 BASELINE_METHODS = {"ddpm", "sdm"}
 ALL_METHODS = sorted(set(METHOD_CONFIGS) | BASELINE_METHODS)
@@ -86,7 +86,7 @@ def load_config_defaults(config_path: str) -> Dict:
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Experiment 2 (physics): does CSHO cross-field coupling help multi-physics coupled-PDE prediction?")
+    p = argparse.ArgumentParser(description="Experiment 2 (physics)")
     p.add_argument("--config", default=None)
     p.add_argument("--data-root", default=None)
     p.add_argument("--problem", default="TE_heat", choices=ALL_PROBLEMS)
@@ -94,20 +94,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--val-split", default="testing")
     p.add_argument("--n-tasks", type=int, default=None)
     p.add_argument("--task-subset", default=None, help="comma-separated explicit task-name override")
-    p.add_argument("--method", default="csho", choices=ALL_METHODS)
+    p.add_argument("--method", default="ccld", choices=ALL_METHODS)
     p.add_argument("--damping-regime", default="critically_damped",
                     choices=["underdamped", "critically_damped", "overdamped"])
     p.add_argument("--target-zeta", type=float, default=None)
-    p.add_argument("--coupling-family", default="mean_field",
-                    choices=["mean_field", "block", "random_heterogeneous"],
-                    help="only used by --method csho_pairwise: how its coupling matrix C is built. "
-                         "'mean_field' reproduces plain csho's C (the default, so csho_pairwise is "
-                         "runnable out of the box); 'block'/'random_heterogeneous' need "
-                         "--coupling-block-sizes/--coupling-w-in/--coupling-w-out or "
-                         "--coupling-epsilon respectively")
-    p.add_argument("--coupling-block-sizes", default=None,
-                    help="comma-separated block sizes summing to the task count N, e.g. '2,1' for "
-                         "TE_heat's {Re Ez, Im Ez} vs {T} -- required when --coupling-family block")
+    p.add_argument("--coupling-family", default="mean_field", choices=["mean_field", "block", "random_heterogeneous"],)
+    p.add_argument("--coupling-block-sizes", default=None,)
     p.add_argument("--coupling-w-in", type=float, default=2.0)
     p.add_argument("--coupling-w-out", type=float, default=1.0)
     p.add_argument("--coupling-epsilon", type=float, default=1.0)
@@ -150,24 +142,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--num-workers", type=int, default=2)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--out-dir", default="results/experiment_2_physics")
-    p.add_argument("--debug-rollout", action="store_true",
-                    help="print trained score_net.output_gain (if present) and the CSHO reverse "
-                         "rollout's per-step state norm for the first eval batch -- diagnostic "
-                         "for isolating where a reverse-SDE divergence originates")
-    p.add_argument("--encoder-only", action="store_true",
-                    help="train only the encoder (init_loss/readout_loss) per seed in --seeds, save a "
-                         "checkpoint per seed to --save-encoder-dir, and exit -- no score net, no eval. "
-                         "Used to produce one shared, frozen encoder per seed that csho/ddpm/sdm all "
-                         "train their own score net on top of via --frozen-encoder-dir.")
-    p.add_argument("--save-encoder-dir", default=None,
-                    help="output directory for --encoder-only checkpoints (one seed{N}.pt per seed)")
-    p.add_argument("--frozen-encoder-dir", default=None,
-                    help="directory of per-seed encoder checkpoints (from --encoder-only) to load and "
-                         "freeze instead of training the encoder jointly with the score net")
-    p.add_argument("--csho-tau", type=float, default=None,
-                    help="if set, CSHO's elapsed dynamical time schedule is held at this constant value "
-                         "(time_scale_fn) instead of the default (T-t)/(t+T) schedule -- see pde/README.md "
-                         "on the corruption-severity confound between CSHO and DDPM/SDM this addresses")
+    p.add_argument("--debug-rollout", action="store_true",)
+    p.add_argument("--encoder-only", action="store_true",)
+    p.add_argument("--save-encoder-dir", default=None,)
+    p.add_argument("--frozen-encoder-dir", default=None,)
+    p.add_argument("--ccld-tau", type=float, default=None,)
     return p
 
 
@@ -190,10 +169,10 @@ def parse_args(argv=None) -> argparse.Namespace:
         [int(s) for s in str(args.coupling_block_sizes).split(",") if s.strip() != ""]
         if args.coupling_block_sizes else None
     )
-    if args.method == "csho_pairwise" and args.coupling_family == "block" and args.coupling_block_sizes is None:
+    if args.method == "ccld_pairwise" and args.coupling_family == "block" and args.coupling_block_sizes is None:
         raise ValueError
     if args.skew_coupling_family != "none":
-        if args.method != "csho_pairwise":
+        if args.method != "ccld_pairwise":
             raise ValueError
         if not args.constant_k:
             raise ValueError
@@ -202,15 +181,15 @@ def parse_args(argv=None) -> argparse.Namespace:
     return args
 
 
-def _csho_time_scale_fn(args):
-    if getattr(args, "csho_tau", None) is not None:
-        tau = args.csho_tau
+def _ccld_time_scale_fn(args):
+    if getattr(args, "ccld_tau", None) is not None:
+        tau = args.ccld_tau
         return lambda t, T: torch.tensor(tau, dtype=torch.float32)
     return None
 
 
 def _build_pde_coupling(args, method: str, N: int, device, seed: int) -> torch.Tensor:
-    if method == "csho_pairwise":
+    if method == "ccld_pairwise":
         family = args.coupling_family
         if family == "mean_field":
             return build_coupling_matrix(N, mode="mean_field", device=device)
@@ -246,12 +225,12 @@ def build_method_state(args, N: int, device, coupling=None, sigma_ab=None):
         cfg = METHOD_CONFIGS[args.method]
         if coupling is None:
             coupling = build_coupling_matrix(N, mode=cfg["coupling_mode"], device=device)
-        if args.method == "csho_pairwise":
+        if args.method == "ccld_pairwise":
             g_per_task = None
             g_matrix = sigma_ab
         else:
             a, b = sigma_ab
-            if args.method == "csho":
+            if args.method == "ccld":
                 g_per_task = None
                 g_matrix = build_g_matrix_n(
                     torch.tensor(a, device=device), N, diffusion_mode="shared",
@@ -265,13 +244,13 @@ def build_method_state(args, N: int, device, coupling=None, sigma_ab=None):
                     torch.tensor(a, device=device), N, diffusion_mode=cfg["diffusion_mode"],
                     g_per_task=g_per_task, coupling_matrix=coupling if cfg["diffusion_mode"] == "independent" else None,
                 )
-        return {"is_csho": True, "cfg": cfg, "coupling": coupling, "g_per_task": g_per_task,
+        return {"is_ccld": True, "cfg": cfg, "coupling": coupling, "g_per_task": g_per_task,
                 "ddpm_sched": None, "sigma": sigma_ab, "g_matrix": g_matrix}
     if args.method == "ddpm":
-        return {"is_csho": False, "cfg": None, "coupling": None, "g_per_task": None,
+        return {"is_ccld": False, "cfg": None, "coupling": None, "g_per_task": None,
                 "ddpm_sched": make_ddpm_schedule(args.n_diff_steps, device=device)}
     if args.method == "sdm":
-        return {"is_csho": False, "cfg": None, "coupling": None, "g_per_task": None, "ddpm_sched": None}
+        return {"is_ccld": False, "cfg": None, "coupling": None, "g_per_task": None, "ddpm_sched": None}
     raise ValueError
 
 
@@ -317,7 +296,7 @@ def _build_score_fns(args, score_net, conditioning):
     return make_score_fn(score_net, conditioning), make_flat_score_fn(score_net, conditioning)
 
 
-def _calibrate_csho_sigma(model, train_loader, N: int, gamma_self: Optional[float], gamma_couple: Optional[float],
+def _calibrate_ccld_sigma(model, train_loader, N: int, gamma_self: Optional[float], gamma_couple: Optional[float],
                            Gamma: Optional[torch.Tensor], coupling: Optional[torch.Tensor],
                            args: argparse.Namespace, device, task_names, is_spatial: bool):
     batch = next(iter(train_loader))
@@ -331,7 +310,7 @@ def _calibrate_csho_sigma(model, train_loader, N: int, gamma_self: Optional[floa
     cov_data = torch.cov(X_flat.T)
     if Gamma is not None:
         sigma_state = calibrate_sigma_fdt_spectral(Gamma, coupling, target_variance=1.0)
-    elif args.method == "csho":
+    elif args.method == "ccld":
         sigma_state = calibrate_sigma_fdt_coupled(gamma_self, gamma_couple, N)
     else:
         sigma_state = (calibrate_sigma_fdt(gamma_self), 0.0)
@@ -466,16 +445,16 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
             p.requires_grad_(False)
         model.eval()
 
-    is_csho = args.method in METHOD_CONFIGS
+    is_ccld = args.method in METHOD_CONFIGS
     if args.score_arch == "fno":
-        if is_csho:
+        if is_ccld:
             score_net = FNOScoreNetwork(N, cond_in_ch, args.n_diff_steps, n_modes=fno_modes,
                                          hidden_channels=args.fno_hidden_channels).to(device)
         else:
             score_net = FlatFNOScoreNetwork(N, cond_in_ch, args.n_diff_steps, n_modes=fno_modes,
                                              hidden_channels=args.fno_hidden_channels).to(device)
     elif args.score_arch == "unet_model":
-        if is_csho:
+        if is_ccld:
             score_net = UNetModelScoreNetwork(N, cond_in_ch, args.n_diff_steps, img_resolution=args.image_size,
                                               model_channels=args.unet_model_channels,
                                               channel_mult=unet_channel_mult, num_blocks=args.unet_num_blocks,
@@ -485,7 +464,7 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
                                                   model_channels=args.unet_model_channels,
                                                   channel_mult=unet_channel_mult, num_blocks=args.unet_num_blocks,
                                                   attn_resolutions=unet_attn_res).to(device)
-    elif is_csho:
+    elif is_ccld:
         score_net = MultiPhysicsScoreNetwork(N, args.latent_dim, model.backbone.out_ch,
                                               n_blocks=args.score_blocks, n_heads=args.score_heads).to(device)
     else:
@@ -497,9 +476,9 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
     else:
         optimizer = torch.optim.Adam(list(model.parameters()) + list(score_net.parameters()), lr=args.lr)
 
-    if is_csho:
+    if is_ccld:
         coupling = _build_pde_coupling(args, args.method, N, device, seed)
-        if args.method == "csho_pairwise":
+        if args.method == "ccld_pairwise":
             Gamma = calibrate_coupled_gammas_spectral(
                 args.alpha_list[0], args.beta_list[0], args.k_reference, args.k_reference, coupling,
                 regime=args.damping_regime, target_zeta=args.target_zeta,
@@ -514,17 +493,17 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
             Gamma = None
             zeta_resolved = None
 
-        sigma_state = _calibrate_csho_sigma(model, train_loader, N, gamma_self, gamma_couple, Gamma, coupling,
+        sigma_state = _calibrate_ccld_sigma(model, train_loader, N, gamma_self, gamma_couple, Gamma, coupling,
                                              args, device, task_names, is_spatial)
         state = build_method_state(args, N, device, coupling=coupling, sigma_ab=sigma_state)
         g_matrix = state["g_matrix"]
         params = precompute_transition_params(
             N, gamma_self, gamma_couple, args.alpha_list, args.beta_list, args.k_reference, coupling,
-            args.n_diff_steps, args.dt, lambda t, T: g_matrix, args.constant_k, _csho_time_scale_fn(args),
+            args.n_diff_steps, args.dt, lambda t, T: g_matrix, args.constant_k, _ccld_time_scale_fn(args),
             damping_matrix=Gamma,
         )
         skew_matrix = skew_sigma_ref = params_skew = None
-        if args.method == "csho_pairwise":
+        if args.method == "ccld_pairwise":
             skew_matrix = _build_pde_skew(args, N, device)
             if skew_matrix is not None:
                 A_vx0, _ = _extract_Avx_Avv_coupled_gamma(
@@ -536,7 +515,7 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
                 params_skew = [
                     closed_form_propagator_skew(
                         N, gamma_self, gamma_couple, args.alpha_list, args.beta_list, args.k_reference, coupling,
-                        tau_hat=elapsed_time_at_step(t_idx, args.n_diff_steps, args.dt, _csho_time_scale_fn(args)),
+                        tau_hat=elapsed_time_at_step(t_idx, args.n_diff_steps, args.dt, _ccld_time_scale_fn(args)),
                         constant_k=True, G0=g_matrix, damping_matrix=Gamma, skew_matrix=skew_matrix,
                         target_variance=1.0,
                     )
@@ -572,12 +551,12 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
 
         t_idx = torch.randint(1, args.n_diff_steps + 1, (1,)).item()
 
-        if is_csho:
+        if is_ccld:
             diffuse_state = targets_norm if is_spatial else [x[0] for x in X]
             orig_shape = diffuse_state[0].shape
             X_flat = torch.cat([diffuse_state[i].reshape(-1, 1) for i in range(N)], dim=-1)
             Z0 = torch.cat([X_flat, torch.zeros_like(X_flat)], dim=-1)
-            q = elapsed_time_at_step(t_idx, args.n_diff_steps, args.dt, _csho_time_scale_fn(args))
+            q = elapsed_time_at_step(t_idx, args.n_diff_steps, args.dt, _ccld_time_scale_fn(args))
             if params_skew is not None:
                 Phi_t, Sigma_t = params_skew[t_idx - 1]
                 Zt, score_target = sample_and_analytic_score_target_skew(Z0, Phi_t, Sigma_t)
@@ -674,7 +653,7 @@ def evaluate(args, model, score_net, val_loader, device, task_names, state, gamm
              ) -> Tuple[Dict[str, float], Dict[str, List[float]], Dict[str, np.ndarray]]:
     model.eval()
     score_net.eval()
-    is_csho = state["is_csho"]
+    is_ccld = state["is_ccld"]
     N = len(task_names)
     is_elder = args.problem == "Elder"
     sums: Dict[str, float] = {}
@@ -692,7 +671,7 @@ def evaluate(args, model, score_net, val_loader, device, task_names, state, gamm
         model_conditioning = _model_input_conditioning(args, batch, conditioning)
         X, K_self, K_global, feat, _ = _encode_state(args, model, task_names, model_conditioning, is_spatial)
 
-        if is_csho:
+        if is_ccld:
             coupling, G = state["coupling"], state["g_matrix"]
             X_init = [[torch.randn_like(x[0])] for x in X] if is_spatial else X
             V = [[torch.zeros_like(x[0])] for x in X_init]
@@ -709,7 +688,7 @@ def evaluate(args, model, score_net, val_loader, device, task_names, state, gamm
                 X_cur, V_cur = anderson_reverse_step_coupled_gamma(
                     X_cur, V_cur, K_self, K_global, score_outputs, t_idx, args.n_diff_steps,
                     args.alpha_list, args.beta_list, gamma_self, gamma_couple,
-                    coupling, args.constant_k, args.dt, G, time_scale_fn=_csho_time_scale_fn(args),
+                    coupling, args.constant_k, args.dt, G, time_scale_fn=_ccld_time_scale_fn(args),
                     damping_matrix=Gamma, skew_matrix=skew_matrix, skew_sigma_ref=skew_sigma_ref,
                 )
             final_latents = [X_cur[i][0] for i in range(N)]

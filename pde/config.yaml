@@ -18,7 +18,7 @@ model:
   score_heads: 4
 
 diffusion:
-  method: "csho"                  # csho | csho_independent | csho_shared_g | csho_independent_g | csho_pairwise | ddpm | sdm
+  method: "ccld"                  # ccld | ccld_independent | ccld_shared_g | ccld_independent_g | ccld_pairwise | ddpm | sdm
   n_diff_steps: 20
   damping_regime: "critically_damped"  # underdamped | critically_damped | overdamped
   target_zeta: null

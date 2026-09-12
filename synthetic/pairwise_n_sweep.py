@@ -86,7 +86,7 @@ def _estimate_prior_std_anderson(
     return prior_std_x, prior_std_v
 
 
-def train_csho_pairwise(N: int, coupling: torch.Tensor, gt: GroundTruthCoupledOU, device, desc: str = "", skew_matrix=None):
+def train_ccld_pairwise(N: int, coupling: torch.Tensor, gt: GroundTruthCoupledOU, device, desc: str = "", skew_matrix=None):
     Gamma = calibrate_coupled_gammas_spectral(ALPHA_V, BETA, K_REFERENCE, K_REFERENCE, coupling, target_zeta=TARGET_ZETA)
     G0 = calibrate_sigma_fdt_spectral(Gamma, coupling, target_variance=1.0)
     g_fn = lambda t, T: G0  # matches _g_fn's constant time schedule
@@ -154,7 +154,7 @@ def train_csho_pairwise(N: int, coupling: torch.Tensor, gt: GroundTruthCoupledOU
 
 
 @torch.no_grad()
-def sample_csho_anderson(
+def sample_ccld_anderson(
     N: int, coupling: torch.Tensor, score_net, Gamma, G0, prior_std, device, desc: str = "",
     skew_matrix=None, skew_sigma_ref=None,
 ):
@@ -189,10 +189,10 @@ def train_one_seed(
         gt = make_ground_truth_from_coupling(N, coupling.to(device), COUPLING_STRENGTH)
     tag = f"[N={N}/{label}] seed={seed}" if label else f"[N={N}] seed={seed}"
     skew_matrix_dev = skew_matrix.to(device) if skew_matrix is not None else None
-    score_net, Gamma, G0, prior_std, skew_sigma_ref = train_csho_pairwise(
+    score_net, Gamma, G0, prior_std, skew_sigma_ref = train_ccld_pairwise(
         N, coupling, gt, device, desc=f"{tag} train", skew_matrix=skew_matrix_dev,
     )
-    generated = sample_csho_anderson(
+    generated = sample_ccld_anderson(
         N, coupling, score_net, Gamma, G0, prior_std, device, desc=f"{tag} sample",
         skew_matrix=skew_matrix_dev, skew_sigma_ref=skew_sigma_ref,
     )
@@ -259,7 +259,7 @@ def run():
 
 
 def parse_args(argv=None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="CSHO mean-field vs pairwise (heterogeneous/block) coupling, N=2..5")
+    p = argparse.ArgumentParser(description="CCLD mean-field vs pairwise (heterogeneous/block) coupling, N=2..5")
     p.add_argument("--seeds", default="0,1,2,3,4")
     p.add_argument("--n-train-iters", type=int, default=2000)
     p.add_argument("--n-samples", type=int, default=4000)

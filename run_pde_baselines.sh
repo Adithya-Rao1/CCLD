@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-PDE_DATA_ROOT="${1:-/home/ubuntu/metis-v1-storage/CSHM-data/multiphysics}"
+PDE_DATA_ROOT="${1:-${PDE_DATA_ROOT:-pde/multiphysics-bench}}"
 PROBLEM="${2:-TE_heat}"
 ARCH="${3:-attention}"
 N_EPOCHS="${4:-150}"
@@ -10,7 +10,7 @@ BATCH_SIZE="${6:-1024}"
 LR="${7:-0.01}"
 SEEDS="${8:-0,1,2,3,4,5,6,7,8,9}"
 NUM_WORKERS="${9:-16}"
-CSHO_TAU="${10:-3.5}"
+CCLD_TAU="${10:-3.5}"
 ENCODER_N_EPOCHS="${11:-${N_EPOCHS}}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,7 +20,7 @@ OUT_DIR="results/experiment_2_physics/${PROBLEM}_${ARCH}"
 ENCODER_DIR="${OUT_DIR}/shared_encoders"
 mkdir -p "${OUT_DIR}"
 
-echo "${PROBLEM}/${ARCH}: n-epochs=${N_EPOCHS} n-diff-steps=${N_DIFF_STEPS} batch-size=${BATCH_SIZE} lr=${LR} seeds=${SEEDS} csho-tau=${CSHO_TAU}"
+echo "${PROBLEM}/${ARCH}: n-epochs=${N_EPOCHS} n-diff-steps=${N_DIFF_STEPS} batch-size=${BATCH_SIZE} lr=${LR} seeds=${SEEDS} ccld-tau=${CCLD_TAU}"
 
 MISSING_ENCODER_SEEDS=""
 for SEED in ${SEEDS//,/ }; do
@@ -47,7 +47,7 @@ else
   echo "shared encoders: already present for all seeds in ${ENCODER_DIR}, skipping"
 fi
 
-for METHOD in csho ddpm sdm; do
+for METHOD in ccld ddpm sdm; do
   RESULT_FILE="${OUT_DIR}/${METHOD}_results.json"
   if [ -f "${RESULT_FILE}" ]; then
     echo "${METHOD}: already present at ${RESULT_FILE}, skipping"
@@ -68,8 +68,8 @@ for METHOD in csho ddpm sdm; do
     --num-workers "${NUM_WORKERS}" \
     --out-dir "${OUT_DIR}" \
     --frozen-encoder-dir "${ENCODER_DIR}" \
-    --csho-tau "${CSHO_TAU}" \
+    --ccld-tau "${CCLD_TAU}" \
     || echo "FAILED: ${PROBLEM}/${ARCH}/${METHOD}"
 done
 
-echo "Done. Results in ${OUT_DIR}/{csho,ddpm,sdm}_results.json"
+echo "Done. Results in ${OUT_DIR}/{ccld,ddpm,sdm}_results.json"

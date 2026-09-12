@@ -6,7 +6,7 @@ ground_truth:
   gt_seed: null                     # null -> defaults to the run seed, so ground truth varies per seed unless pinned
 
 diffusion:
-  method: "csho"                    # csho | csho_independent | csho_pairwise | ddpm | sdm
+  method: "ccld"                    # ccld | ccld_independent | ccld_pairwise | ddpm | sdm
   damping_regime: "critically_damped"  # underdamped | critically_damped | overdamped
   target_zeta: null
   alpha: "1.0"
