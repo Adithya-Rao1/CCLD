@@ -129,17 +129,27 @@ python -m synthetic.make_stepcount_figures
 
 ### Coupled PDE field reconstruction
 
-Single seed, 200 epochs, batch size 1024, learning rate $10^{-2}$, 32 diffusion steps, on the
-electro-thermal (`TE_heat`) split of the Multiphysics-Bench benchmark:
+First, download the electro-thermal (`TE_heat`) split of the Multiphysics-Bench benchmark:
 
 ```
-for METHOD in csho ddpm sdm; do
+python -m pde.download_multiphysics_bench --out-dir pde/multiphysics-bench
+```
+
+`pde/multiphysics-bench` is the default data root every script below assumes; export
+`PDE_DATA_ROOT=/wherever/you/downloaded/it` instead if you'd rather keep the data elsewhere.
+
+Single seed, 200 epochs, batch size 1024, learning rate $10^{-2}$, 32 diffusion steps:
+
+```
+for METHOD in ccld ddpm sdm; do
   python -m pde.run_experiment \
-    --config pde/config.yaml --data-root /data/multiphysics --problem TE_heat \
+    --config pde/config.yaml --data-root pde/multiphysics-bench --problem TE_heat \
     --method ${METHOD} --seeds 0 --n-epochs 200 --batch-size 1024 --lr 1e-2 \
     --n-diff-steps 32 --out-dir results/experiment_2_physics/TE_heat_comparison
 done
 ```
+
+For the full sweep across 10 seeds, run: `bash run_pde_baselines.sh`.
 
 ## Future Work
 We are currently focusing on implementing asymmetric coupling to induce stronger biases in the forward dynamics, as well as designing more efficient sampling methods to reduce discretization errors arising from the score term.
