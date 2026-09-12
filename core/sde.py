@@ -25,11 +25,11 @@ def build_g_matrix_n(
             G[i, i] = sigma_t
     elif diffusion_mode == "independent":
         if g_per_task is None or len(g_per_task) != N:
-            raise ValueError('diffusion_mode="independent" requires g_per_task of length N')
+            raise ValueError
         for i in range(N):
             G[i, i] = g_per_task[i]
     else:
-        raise ValueError(f"Unknown diffusion_mode: {diffusion_mode!r}")
+        raise ValueError
 
     if coupling_matrix is not None:
         off_diag = coupling_matrix.to(device=device, dtype=torch.float32).clone()

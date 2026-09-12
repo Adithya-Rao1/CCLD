@@ -121,7 +121,7 @@ def score_target_complexity(N: int, coupling: torch.Tensor, device, skew_matrix,
     return rows
 
 
-def run() -> None:
+def run(complexity_only: bool = False) -> None:
     os.makedirs(OUT_DIR, exist_ok=True)
     asp.N_DIFF_STEPS = N_DIFF_STEPS
     asp.DT = 1.0 / N_DIFF_STEPS
@@ -150,6 +150,9 @@ def run() -> None:
                 for row in rows:
                     complexity_all.append({"N": N, "condition": label, "scale": scale, **row})
             print(f"  {label}: done")
+
+        if complexity_only:
+            continue
 
         conditions = _skew_conditions(gt, coupling, device)
         for label, skew_matrix in conditions:
@@ -180,7 +183,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--n-diff-steps", type=int, default=32)
     p.add_argument("--skew-scale", type=float, default=1.0)
     p.add_argument("--out-dir", default="results/experiment_3_synthetic/additive_skew_learning_diagnostics")
-    p.add_argument("--quick", action="store_true", help="tiny scale for smoke-testing the pipeline end-to-end")
+    p.add_argument("--complexity-only", action="store_true",)
+    p.add_argument("--quick", action="store_true",)
     return p.parse_args(argv)
 
 
@@ -202,4 +206,4 @@ if __name__ == "__main__":
         N_SWEEP = [2, 3]
         N_DIFF_STEPS = 8
         SCALE_SWEEP = [0.0, 1.0]
-    run()
+    run(complexity_only=_args.complexity_only)
