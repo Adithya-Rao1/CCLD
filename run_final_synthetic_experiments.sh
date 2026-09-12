@@ -12,10 +12,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
 
 BASELINE_DIR="results/experiment_3_synthetic/final_baselines_seeds${N_SEEDS}_iters${N_ITERS}_steps${N_DIFF_STEPS}"
-CCLD_OUT_DIR="results/experiment_3_synthetic/final_champion_seeds${N_SEEDS}_iters${N_ITERS}_steps${N_DIFF_STEPS}"
+CCLD_OUT_DIR="results/experiment_3_synthetic/final_seeds${N_SEEDS}_iters${N_ITERS}_steps${N_DIFF_STEPS}"
 
 echo "Config: seeds=0..$((N_SEEDS-1)) (n=${N_SEEDS}), n_train_iters=${N_ITERS}, n_samples=${N_SAMPLES}, n_diff_steps=${N_DIFF_STEPS}, dt=${DT}"
-echo "Baselines -> ${BASELINE_DIR}, champion -> ${CCLD_OUT_DIR}"
+echo "Baselines -> ${BASELINE_DIR}, Leading -> ${CCLD_OUT_DIR}"
 
 for N in 2 3 4 5; do
   for METHOD in ddpm sdm; do
