@@ -26,8 +26,8 @@ from synthetic.metrics import (
     integrated_autocorrelation_time, lag_k_autocorrelation,
 )
 
-CSHO_METHODS = {"csho": "mean_field", "csho_independent": "independent", "csho_pairwise": "pairwise"}
-ALL_METHODS = sorted(list(CSHO_METHODS) + ["ddpm", "sdm"])
+CCLD_METHODS = {"ccld": "mean_field", "ccld_independent": "independent", "ccld_pairwise": "pairwise"}
+ALL_METHODS = sorted(list(CCLD_METHODS) + ["ddpm", "sdm"])
 
 
 def _default_pairwise_weights(N: int, device=None) -> torch.Tensor:
@@ -157,7 +157,7 @@ def load_config_defaults(config_path: str) -> Dict:
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Experiment 3 (synthetic): does CSHO-N recover a known coupled-OU joint distribution?")
+    p = argparse.ArgumentParser(description="Experiment 3 (synthetic): does CCLD-N recover a known coupled-OU joint distribution?")
     p.add_argument("--config", default=None)
     p.add_argument("--N", type=int, default=3)
     p.add_argument("--coupling-strength", type=float, default=0.6)
@@ -165,7 +165,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--gt-sigma-scale", type=float, default=1.0)
     p.add_argument("--gt-seed", type=int, default=None)
 
-    p.add_argument("--method", default="csho", choices=ALL_METHODS)
+    p.add_argument("--method", default="ccld", choices=ALL_METHODS)
     p.add_argument("--damping-regime", default="critically_damped", choices=["underdamped", "critically_damped", "overdamped"])
     p.add_argument("--target-zeta", type=float, default=None)
     p.add_argument("--alpha", default="1.0")
@@ -259,9 +259,9 @@ def _diffusion_mode_g_fn(args, N: int, coupling: torch.Tensor, device):
     return g_fn
 
 
-def _build_csho_state(args: argparse.Namespace, device):
+def _build_ccld_state(args: argparse.Namespace, device):
     N = args.N
-    mode = CSHO_METHODS[args.method]
+    mode = CCLD_METHODS[args.method]
     if mode == "pairwise":
         weights = torch.ones((N, N), device=device)
         coupling = build_coupling_matrix(N, mode="pairwise", weights=weights, device=device)
@@ -305,9 +305,9 @@ def _estimate_prior_std(args, gt: GroundTruthCoupledOU, K_self, K_global, coupli
     return prior_std_x, prior_std_v
 
 
-def train_csho(args, gt: GroundTruthCoupledOU, device) -> Tuple[nn.Module, List[float], torch.Tensor, Tuple[List[float], List[float]]]:
+def train_ccld(args, gt: GroundTruthCoupledOU, device) -> Tuple[nn.Module, List[float], torch.Tensor, Tuple[List[float], List[float]]]:
     N = args.N
-    coupling, gamma, g_fn = _build_csho_state(args, device)
+    coupling, gamma, g_fn = _build_ccld_state(args, device)
     K_self, K_global = _make_conditioning(N, args.batch_size, args.k_reference, device)
     net_cls = SiloedCoupledScoreNet if args.siloed_score_net else CoupledScoreNet
     score_net = net_cls(N, args.hidden_dim, args.n_layers, args.time_embed_dim).to(device)
@@ -338,7 +338,7 @@ def train_csho(args, gt: GroundTruthCoupledOU, device) -> Tuple[nn.Module, List[
 
 
 @torch.no_grad()
-def sample_csho(args, score_net, gamma, coupling, prior_std, device) -> torch.Tensor:
+def sample_ccld(args, score_net, gamma, coupling, prior_std, device) -> torch.Tensor:
     N = args.N
     g_fn = _diffusion_mode_g_fn(args, N, coupling, device)
     K_self, K_global = _make_conditioning(N, args.n_samples, args.k_reference, device)
@@ -482,9 +482,9 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
     gt_seed = args.gt_seed if args.gt_seed is not None else seed
     gt = make_ground_truth(args.N, args.coupling_strength, gt_seed, args.base_decay, args.gt_sigma_scale, device=device)
 
-    if args.method in CSHO_METHODS:
-        score_net, gamma, coupling, prior_std = train_csho(args, gt, device)
-        generated = sample_csho(args, score_net, gamma, coupling, prior_std, device)
+    if args.method in CCLD_METHODS:
+        score_net, gamma, coupling, prior_std = train_ccld(args, gt, device)
+        generated = sample_ccld(args, score_net, gamma, coupling, prior_std, device)
     elif args.method == "ddpm":
         score_net, ac, betas, alphas = train_ddpm(args, gt, device)
         generated = sample_ddpm(args, score_net, ac, betas, alphas, device)
@@ -498,8 +498,8 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
 
     metrics = evaluate_sampling_quality(generated, gt)
 
-    if args.method in CSHO_METHODS:
-        _, gamma_full, g_fn = _build_csho_state(args, device)
+    if args.method in CCLD_METHODS:
+        _, gamma_full, g_fn = _build_ccld_state(args, device)
         autocorr_lag1, iac_time = _measure_mixing_time(args, gt, coupling, gamma_full, device)
         metrics["autocorr_lag1"] = autocorr_lag1
         metrics["integrated_autocorr_time"] = iac_time

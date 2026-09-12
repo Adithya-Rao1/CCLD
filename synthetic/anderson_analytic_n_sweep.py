@@ -72,7 +72,7 @@ def _estimate_prior_std_anderson(N: int, gt: GroundTruthCoupledOU, coupling, gam
     return prior_std_x, prior_std_v
 
 
-def train_csho_analytic(N: int, sigma_ab: Tuple[float, float], gt: GroundTruthCoupledOU, device):
+def train_ccld_analytic(N: int, sigma_ab: Tuple[float, float], gt: GroundTruthCoupledOU, device):
     coupling = build_coupling_matrix(N, mode="mean_field", device=device)
     gamma_self, gamma_couple = calibrate_coupled_gammas(ALPHA_V, BETA, K_REFERENCE, K_REFERENCE, N, target_zeta=TARGET_ZETA)
     g_fn = _g_fn(N, sigma_ab, coupling, device)
@@ -109,7 +109,7 @@ def train_csho_analytic(N: int, sigma_ab: Tuple[float, float], gt: GroundTruthCo
 
 
 @torch.no_grad()
-def sample_csho_anderson(N: int, sigma_ab: Tuple[float, float], score_net, gamma_self, gamma_couple, coupling, prior_std, device):
+def sample_ccld_anderson(N: int, sigma_ab: Tuple[float, float], score_net, gamma_self, gamma_couple, coupling, prior_std, device):
     g_fn = _g_fn(N, sigma_ab, coupling, device)
     K_self, K_global = _make_conditioning(N, N_SAMPLES, K_REFERENCE, device)
     prior_std_x, prior_std_v = prior_std
@@ -131,8 +131,8 @@ def train_one_seed(N: int, seed: int) -> Dict[str, float]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     sigma_ab = _get_sigma_n(N)
     gt = make_ground_truth(N, COUPLING_STRENGTH, seed, 1.0, 1.0, device=device)
-    score_net, gamma_self, gamma_couple, coupling, prior_std = train_csho_analytic(N, sigma_ab, gt, device)
-    generated = sample_csho_anderson(N, sigma_ab, score_net, gamma_self, gamma_couple, coupling, prior_std, device)
+    score_net, gamma_self, gamma_couple, coupling, prior_std = train_ccld_analytic(N, sigma_ab, gt, device)
+    generated = sample_ccld_anderson(N, sigma_ab, score_net, gamma_self, gamma_couple, coupling, prior_std, device)
     return evaluate_sampling_quality(generated, gt)
 
 
@@ -163,14 +163,14 @@ def run():
         for seed in SEEDS:
             m = train_one_seed(N, seed)
             per_seed[seed] = m
-            per_seed_rows.append({"N": N, "method": "csho_analytic", "seed": seed, **m})
+            per_seed_rows.append({"N": N, "method": "ccld_analytic", "seed": seed, **m})
             print(f"  seed={seed}: kl={m['kl_divergence']:.4f} corr_gen={m['mean_pairwise_corr_gen']:.4f} corr_true={m['mean_pairwise_corr_true']:.4f}")
 
-        csho_summary = aggregate_over_seeds(per_seed)
-        for metric, stats in csho_summary.items():
-            all_rows.append({"N": N, "method": "csho_analytic", "metric": metric, **stats})
+        ccld_summary = aggregate_over_seeds(per_seed)
+        for metric, stats in ccld_summary.items():
+            all_rows.append({"N": N, "method": "ccld_analytic", "metric": metric, **stats})
 
-        for method_name, s in [("ddpm", ddpm), ("sdm", sdm), ("csho_analytic", csho_summary)]:
+        for method_name, s in [("ddpm", ddpm), ("sdm", sdm), ("ccld_analytic", ccld_summary)]:
             summary_rows.append({
                 "N": N, "method": method_name,
                 "kl_mean": s["kl_divergence"]["mean"], "kl_std": s["kl_divergence"]["std"],
@@ -183,7 +183,7 @@ def run():
         for baseline_name, baseline_per_seed in [("ddpm", ddpm_per_seed), ("sdm", sdm_per_seed)]:
             sig = compare_configs(baseline_per_seed, per_seed, metric_names=sig_metric_names)
             for metric, s in sig.items():
-                sig_rows.append({"N": N, "comparison": f"csho_analytic_vs_{baseline_name}", "metric": metric, **s})
+                sig_rows.append({"N": N, "comparison": f"ccld_analytic_vs_{baseline_name}", "metric": metric, **s})
 
     write_csv(per_seed_rows, os.path.join(OUT_DIR, "analytic_n_sweep_per_seed.csv"))
     write_csv(sig_rows, os.path.join(OUT_DIR, "analytic_n_sweep_significance.csv"))
@@ -195,7 +195,7 @@ def run():
         os.path.join(OUT_DIR, "analytic_n_sweep_results.json"),
     )
 
-    print("\n\n=== SUMMARY: N=2..5, DDPM vs SDM vs CSHO-Analytic (Anderson-corrected, analytic score target) ===")
+    print("\n\n=== SUMMARY: N=2..5, DDPM vs SDM vs CCLD-Analytic (Anderson-corrected, analytic score target) ===")
     print(f"{'N':>3} {'method':>16} {'KL':>10} {'corr_gen':>10} {'corr_true':>10} {'%true':>8}")
     for row in summary_rows:
         print(f"{row['N']:>3} {row['method']:>16} {row['kl_mean']:>10.4f} {row['corr_gen_mean']:>10.4f} {row['corr_true']:>10.4f} {row['corr_pct_of_true']:>8.1f}")
@@ -205,7 +205,7 @@ def run():
 
 
 def parse_args(argv=None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Analytic-DSM CSHO vs. DDPM/SDM, N=2..5")
+    p = argparse.ArgumentParser(description="Analytic-DSM CCLD vs. DDPM/SDM, N=2..5")
     p.add_argument("--seeds", default="0,1,2,3,4")
     p.add_argument("--n-train-iters", type=int, default=2000)
     p.add_argument("--n-samples", type=int, default=4000)

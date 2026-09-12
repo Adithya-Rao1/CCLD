@@ -23,7 +23,7 @@ def run_experiment_1(args: argparse.Namespace) -> Optional[Dict]:
         "--data-root", args.vision_data_root,
         "--source", args.vision_source,
         "--tasks", args.vision_tasks,
-        "--method", "csho",
+        "--method", "ccld",
         "--seeds", "0" if smoke else args.seeds,
         "--n-epochs", "1" if smoke else str(args.n_epochs),
         "--batch-size", "2" if smoke else str(args.batch_size),
@@ -46,7 +46,7 @@ def run_experiment_2(args: argparse.Namespace) -> Optional[Dict]:
     argv = [
         "--data-root", args.physics_data_root,
         "--problem", args.physics_problem,
-        "--method", "csho",
+        "--method", "ccld",
         "--seeds", "0" if smoke else args.seeds,
         "--n-epochs", "1" if smoke else str(args.n_epochs),
         "--batch-size", "2" if smoke else str(args.batch_size),
@@ -69,7 +69,7 @@ def run_experiment_3(args: argparse.Namespace) -> Dict:
     argv = [
         "--N", str(args.synthetic_N),
         "--coupling-strength", str(args.synthetic_coupling_strength),
-        "--method", "csho",
+        "--method", "ccld",
         "--seeds", "0" if smoke else args.seeds,
         "--n-train-iters", "20" if smoke else str(args.synthetic_n_train_iters),
         "--n-samples", "200" if smoke else str(args.synthetic_n_samples),
@@ -85,7 +85,7 @@ def run_experiment_3(args: argparse.Namespace) -> Dict:
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Run all three CSHO validation experiments (or a fast smoke pass over all of them).")
+    p = argparse.ArgumentParser(description="Run all three CCLD validation experiments (or a fast smoke pass over all of them).")
     p.add_argument("--mode", default="smoke", choices=["smoke", "full"])
     p.add_argument("--out-dir", default="results/run_all")
     p.add_argument("--seeds", default="0,1,2,3,4")
@@ -129,7 +129,7 @@ def main():
     write_csv(summary_rows, os.path.join(args.out_dir, "run_all_summary.csv"))
     write_json({"mode": args.mode, "results": results}, os.path.join(args.out_dir, "run_all_results.json"))
     render_experiment_report(
-        experiment_name=f"CSHO validation suite -- run_all ({args.mode})",
+        experiment_name=f"CCLD validation suite -- run_all ({args.mode})",
         summary_rows=summary_rows, significance_rows=[], figure_paths=[],
         out_path=os.path.join(args.out_dir, "run_all_report.md"),
     )

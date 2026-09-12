@@ -78,7 +78,7 @@ def sweep_n_fields(args, results, significance_rows):
             "--problem", args.n_fields_problem,
             "--n-tasks", str(n),
             "--task-subset", ",".join(fields),
-            "--method", "csho",
+            "--method", "ccld",
             "--damping-regime", args.default_damping_regime,
         ]
         per_seed = run_config(args, label, argv, f"n_fields/{label}")
@@ -87,7 +87,7 @@ def sweep_n_fields(args, results, significance_rows):
 
 def sweep_coupling_mode(args, results, significance_rows):
     baseline = [None, None]
-    for method in ["csho", "csho_pairwise", "csho_independent"]:
+    for method in ["ccld", "ccld_pairwise", "ccld_independent"]:
         argv = ["--method", method, "--damping-regime", args.default_damping_regime]
         per_seed = run_config(args, method, argv, f"coupling_mode/{method}")
         _record_axis(results, significance_rows, "coupling_mode", method, {}, per_seed, baseline)
@@ -97,7 +97,7 @@ def sweep_alpha_beta(args, results, significance_rows):
     baseline_alpha = [None, None]
     for alpha_val in args.alpha_grid:
         label = f"alpha{alpha_val}"
-        argv = ["--method", "csho", "--damping-regime", args.default_damping_regime,
+        argv = ["--method", "ccld", "--damping-regime", args.default_damping_regime,
                 "--alpha", str(alpha_val), "--beta", str(args.beta_grid[0])]
         per_seed = run_config(args, label, argv, f"alpha_beta/{label}")
         _record_axis(results, significance_rows, "alpha", label, {"alpha": alpha_val}, per_seed, baseline_alpha)
@@ -105,7 +105,7 @@ def sweep_alpha_beta(args, results, significance_rows):
     baseline_beta = [None, None]
     for beta_val in args.beta_grid:
         label = f"beta{beta_val}"
-        argv = ["--method", "csho", "--damping-regime", args.default_damping_regime,
+        argv = ["--method", "ccld", "--damping-regime", args.default_damping_regime,
                 "--alpha", str(args.alpha_grid[0]), "--beta", str(beta_val)]
         per_seed = run_config(args, label, argv, f"alpha_beta/{label}")
         _record_axis(results, significance_rows, "beta", label, {"beta": beta_val}, per_seed, baseline_beta)
@@ -115,14 +115,14 @@ def sweep_damping_regime(args, results, significance_rows):
     baseline = [None, None]
     for regime in ["underdamped", "critically_damped", "overdamped"]:
         label = f"damping_{regime}"
-        argv = ["--method", "csho", "--damping-regime", regime]
+        argv = ["--method", "ccld", "--damping-regime", regime]
         per_seed = run_config(args, label, argv, f"damping_regime/{regime}")
         _record_axis(results, significance_rows, "damping_regime", label, {"regime": regime}, per_seed, baseline)
 
 
 def sweep_diffusion_mode(args, results, significance_rows):
     baseline = [None, None]
-    for method in ["csho_shared_g", "csho_independent_g"]:
+    for method in ["ccld_shared_g", "ccld_independent_g"]:
         argv = ["--method", method, "--damping-regime", args.default_damping_regime]
         per_seed = run_config(args, method, argv, f"diffusion_mode/{method}")
         _record_axis(results, significance_rows, "diffusion_mode", method, {}, per_seed, baseline)
@@ -137,7 +137,7 @@ def _coupling_label(problem: str) -> str:
 def sweep_problem(args, results, significance_rows):
     baseline = [None, None]
     for problem in ALL_PROBLEMS:
-        argv = ["--problem", problem, "--method", "csho", "--damping-regime", args.default_damping_regime]
+        argv = ["--problem", problem, "--method", "ccld", "--damping-regime", args.default_damping_regime]
         per_seed = run_config(args, problem, argv, f"problem/{problem}")
         _record_axis(
             results, significance_rows, "problem", problem,
@@ -156,7 +156,7 @@ AXIS_FNS = {
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Ablation grid for Experiment 2 (physics multi-field CSHO diffusion).")
+    p = argparse.ArgumentParser(description="Ablation grid for Experiment 2 (physics multi-field CCLD diffusion).")
     p.add_argument("--data-root", required=True)
     p.add_argument("--out-dir", default="results/experiment_2_physics/ablations")
     p.add_argument("--seeds", default="0,1,2,3,4")

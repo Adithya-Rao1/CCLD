@@ -15,7 +15,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
 
 PROBLEMS=(TE_heat)
-METHODS=(csho ddpm sdm)
+METHODS=(ccld ddpm sdm)
 IFS=',' read -ra ARCHES <<< "${PDE_ARCHES}"
 declare -A PDE_LR=(
   [attention]="0.01"
