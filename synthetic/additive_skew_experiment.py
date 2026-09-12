@@ -30,10 +30,10 @@ def build_generic_skew_additive(N: int, seed: int, device, scale: float = SKEW_S
     return parametrize_skew_matrix(W).to(device)
 
 
-def build_structured_skew_additive(gt, coupling: torch.Tensor, device, scale: float = SKEW_SCALE) -> torch.Tensor:
-    N = gt.N
-    theta = gt.theta.to(device)
-    theta_antisym = theta - theta.T
+def build_belief_skew_additive(S: torch.Tensor, coupling: torch.Tensor, device, scale: float = SKEW_SCALE) -> torch.Tensor:
+    N = S.shape[0]
+    S = S.to(device)
+    belief_antisym = S - S.T
 
     Gamma = calibrate_coupled_gammas_spectral(
         asp.ALPHA_V, asp.BETA, asp.K_REFERENCE, asp.K_REFERENCE, coupling, target_zeta=asp.TARGET_ZETA,
@@ -42,11 +42,15 @@ def build_structured_skew_additive(gt, coupling: torch.Tensor, device, scale: fl
     K = -A0[N:, :N]
 
     W = torch.zeros(2 * N, 2 * N, device=device)
-    W[:N, :N] = theta_antisym * scale  # XX
-    W[:N, N:] = (theta_antisym * K) * scale  # XV
-    W[N:, :N] = (theta_antisym * K) * scale  # VX
-    W[N:, N:] = (theta_antisym * Gamma) * scale  # VV
+    W[:N, :N] = belief_antisym * scale  # XX
+    W[:N, N:] = (belief_antisym * K) * scale  # XV
+    W[N:, :N] = (belief_antisym * K) * scale  # VX
+    W[N:, N:] = (belief_antisym * Gamma) * scale  # VV
     return parametrize_skew_matrix(W)
+
+
+def build_structured_skew_additive(gt, coupling: torch.Tensor, device, scale: float = SKEW_SCALE) -> torch.Tensor:
+    return build_belief_skew_additive(gt.theta, coupling, device, scale=scale)
 
 
 def run() -> List[Dict]:
