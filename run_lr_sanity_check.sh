@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-PDE_DATA_ROOT="${1:-/home/ubuntu/metis-v1-storage/CSHM-data/multiphysics}"
+PDE_DATA_ROOT="${1:-${PDE_DATA_ROOT:-pde/multiphysics-bench}}"
 N_EPOCHS="${2:-50}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

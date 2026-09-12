@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-PDE_DATA_ROOT="${1:-/home/ubuntu/metis-v1-storage/CSHM-data/multiphysics}"
+PDE_DATA_ROOT="${1:-${PDE_DATA_ROOT:-pde/multiphysics-bench}}"
 PROBLEM="${2:-TE_heat}"
 ARCH="${3:-attention}"
 N_EPOCHS="${4:-150}"
