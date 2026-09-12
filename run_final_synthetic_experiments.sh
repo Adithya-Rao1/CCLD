@@ -14,17 +14,17 @@ cd "$REPO_ROOT"
 BASELINE_DIR="results/experiment_3_synthetic/final_baselines_seeds${N_SEEDS}_iters${N_ITERS}_steps${N_DIFF_STEPS}"
 CSHO_OUT_DIR="results/experiment_3_synthetic/final_champion_seeds${N_SEEDS}_iters${N_ITERS}_steps${N_DIFF_STEPS}"
 
-echo "=== Config: seeds=0..$((N_SEEDS-1)) (n=${N_SEEDS}), n_train_iters=${N_ITERS}, n_samples=${N_SAMPLES}, n_diff_steps=${N_DIFF_STEPS}, dt=${DT} ==="
-echo "=== Baselines -> ${BASELINE_DIR}, champion -> ${CSHO_OUT_DIR} ==="
+echo "Config: seeds=0..$((N_SEEDS-1)) (n=${N_SEEDS}), n_train_iters=${N_ITERS}, n_samples=${N_SAMPLES}, n_diff_steps=${N_DIFF_STEPS}, dt=${DT}"
+echo "Baselines -> ${BASELINE_DIR}, champion -> ${CSHO_OUT_DIR}"
 
 for N in 2 3 4 5; do
   for METHOD in ddpm sdm; do
     OUT="${BASELINE_DIR}/N${N}_${METHOD}"
     if [ -f "${OUT}/${METHOD}_results.json" ]; then
-      echo "--- N=${N} ${METHOD}: already present at ${OUT}, skipping ---"
+      echo "N=${N} ${METHOD}: already present at ${OUT}, skipping"
       continue
     fi
-    echo "--- N=${N} ${METHOD}: training ---"
+    echo "N=${N} ${METHOD}: training"
     python -m synthetic.run_experiment \
       --method "${METHOD}" \
       --N "${N}" \
@@ -40,9 +40,9 @@ for N in 2 3 4 5; do
 done
 
 if [ -f "${CSHO_OUT_DIR}/analytic_n_sweep_summary.csv" ]; then
-  echo "--- CSHO-Analytic champion, N=2..5: already present at ${CSHO_OUT_DIR}, skipping ---"
+  echo "CSHO-Analytic champion, N=2..5: already present at ${CSHO_OUT_DIR}, skipping"
 else
-  echo "--- CSHO-Analytic champion, N=2..5: training ---"
+  echo "CSHO-Analytic champion, N=2..5: training"
   python -m synthetic.anderson_analytic_n_sweep \
     --seeds "${SEEDS}" \
     --n-train-iters "${N_ITERS}" \
@@ -54,6 +54,6 @@ else
     --baseline-dir "${BASELINE_DIR}"
 fi
 
-echo "=== Done. Final comparison written to ${CSHO_OUT_DIR}/analytic_n_sweep_summary.csv ==="
-echo "=== Per-seed table (for Wilcoxon): ${CSHO_OUT_DIR}/analytic_n_sweep_per_seed.csv ==="
-echo "=== Significance table: ${CSHO_OUT_DIR}/analytic_n_sweep_significance.csv ==="
+echo "Done. Final comparison written to ${CSHO_OUT_DIR}/analytic_n_sweep_summary.csv"
+echo "Per-seed table (for Wilcoxon): ${CSHO_OUT_DIR}/analytic_n_sweep_per_seed.csv"
+echo "Significance table: ${CSHO_OUT_DIR}/analytic_n_sweep_significance.csv"

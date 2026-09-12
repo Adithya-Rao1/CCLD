@@ -19,11 +19,11 @@ for ARCH in "${ARCHES[@]}"; do
     OUT_DIR="results/lr_sanity_check_v2/TE_heat_csho_${ARCH}_lr${LR}"
     RESULT_FILE="${OUT_DIR}/csho_results.json"
     if [ -f "${RESULT_FILE}" ]; then
-      echo "--- ${ARCH} lr=${LR}: already present at ${RESULT_FILE}, skipping ---"
+      echo "${ARCH} lr=${LR}: already present at ${RESULT_FILE}, skipping"
       continue
     fi
     mkdir -p "${OUT_DIR}"
-    echo "--- ${ARCH} lr=${LR}: training ---"
+    echo "${ARCH} lr=${LR}: training"
     python -m pde.run_experiment \
       --config pde/config.yaml \
       --data-root "${PDE_DATA_ROOT}" \
