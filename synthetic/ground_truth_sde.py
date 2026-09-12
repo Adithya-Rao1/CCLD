@@ -130,8 +130,7 @@ def make_directional_ground_truth(
         raise ValueError
 
     g = torch.Generator().manual_seed(seed)
-    w = torch.rand((N, N), generator=g, dtype=dtype)
-    w.fill_diagonal_(0.0)
+    w = torch.rand((N, N), generator=g, dtype=dtype) # can also make 0 diagonal, just has to row sum to 1
     row_sum = w.sum(dim=-1, keepdim=True).clamp_min(1e-8)
     w = w / row_sum
 
