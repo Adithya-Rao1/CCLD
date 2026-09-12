@@ -158,7 +158,7 @@ def run():
                 per_seed_rows.append({"N": N, "method": method_name, "seed": seed, **m})
 
         _a, _b = _get_sigma_n(N)
-        print(f"\n=== N={N} (a={_a:.4f}, b={_b:.4f}, score_target=analytic, beta={BETA}, n_diff_steps={N_DIFF_STEPS}, dt={DT}) ===")
+        print(f"\nN={N} (a={_a:.4f}, b={_b:.4f}, score_target=analytic, beta={BETA}, n_diff_steps={N_DIFF_STEPS}, dt={DT})")
         per_seed = {}
         for seed in SEEDS:
             m = train_one_seed(N, seed)
@@ -195,7 +195,7 @@ def run():
         os.path.join(OUT_DIR, "analytic_n_sweep_results.json"),
     )
 
-    print("\n\n=== SUMMARY: N=2..5, DDPM vs SDM vs CCLD-Analytic (Anderson-corrected, analytic score target) ===")
+    print("\n\nSUMMARY: N=2..5, DDPM vs SDM vs CCLD-Analytic (Anderson-corrected, analytic score target)")
     print(f"{'N':>3} {'method':>16} {'KL':>10} {'corr_gen':>10} {'corr_true':>10} {'%true':>8}")
     for row in summary_rows:
         print(f"{row['N']:>3} {row['method']:>16} {row['kl_mean']:>10.4f} {row['corr_gen_mean']:>10.4f} {row['corr_true']:>10.4f} {row['corr_pct_of_true']:>8.1f}")
