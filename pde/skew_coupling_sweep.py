@@ -5,6 +5,7 @@ import os
 from typing import Dict, List, Optional
 
 import torch
+from tqdm import tqdm
 
 from core.reporting import write_csv
 from core.stats import aggregate_over_seeds, compare_configs
@@ -115,20 +116,21 @@ def run(args: argparse.Namespace) -> None:
 
     sig_metrics = ["mean_rel_l2"] + RESIDUAL_METRIC_KEYS_BY_PROBLEM.get(args.problem, [])
     summary_rows, per_seed_rows, sig_rows = [], [], []
-    per_seed_by_condition: Dict[str, Dict[int, Dict[str, float]]] = {}
+    labels = [c for c in CCLD_CONDITIONS if c in args.conditions] + [c for c in BASELINE_CONDITIONS if c in args.conditions]
+    cond_args_by_label = {label: parse_args(_condition_argv(label, args, norms["generic_scale"])) for label in labels}
+    per_seed_by_condition: Dict[str, Dict[int, Dict[str, float]]] = {label: {} for label in labels}
+    run_pairs = [(label, seed) for label in labels for seed in args.seeds]
 
-    for label in [c for c in CCLD_CONDITIONS if c in args.conditions] + [c for c in BASELINE_CONDITIONS if c in args.conditions]:
-        cond_args = parse_args(_condition_argv(label, args, norms["generic_scale"]))
-        per_seed = {}
-        for seed in args.seeds:
-            print(f"\n[skew_coupling_sweep] problem={args.problem} condition={label} seed={seed}")
-            metrics = train_one_seed(cond_args, seed)
-            metrics = _derive_summary_metrics(metrics, args.problem)
-            per_seed[seed] = metrics
-            per_seed_rows.append({"condition": label, "seed": seed, **metrics})
-            print(f"  mean_rel_l2={metrics['mean_rel_l2']:.4f}")
-        per_seed_by_condition[label] = per_seed
-        cond_summary = aggregate_over_seeds(per_seed)
+    for label, seed in tqdm(run_pairs, desc="[skew_coupling_sweep] overall"):
+        print(f"\n[skew_coupling_sweep] problem={args.problem} condition={label} seed={seed}")
+        metrics = train_one_seed(cond_args_by_label[label], seed)
+        metrics = _derive_summary_metrics(metrics, args.problem)
+        per_seed_by_condition[label][seed] = metrics
+        per_seed_rows.append({"condition": label, "seed": seed, **metrics})
+        print(f"  mean_rel_l2={metrics['mean_rel_l2']:.4f}")
+
+    for label in labels:
+        cond_summary = aggregate_over_seeds(per_seed_by_condition[label])
         summary_rows.append({
             "condition": label,
             **{f"{m}_mean": cond_summary[m]["mean"] for m in sig_metrics if m in cond_summary},

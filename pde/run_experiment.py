@@ -207,7 +207,8 @@ def _te_heat_theta_from_dataset(train_ds, task_names: List[str], device, seed: i
     gen = torch.Generator().manual_seed(seed)
     n = min(n_samples, len(train_ds))
     idxs = torch.randperm(len(train_ds), generator=gen)[:n].tolist()
-    batch = collate_fn([train_ds[i] for i in idxs])
+    samples = [train_ds[i] for i in tqdm(idxs, desc="theta_TE: loading samples")]
+    batch = collate_fn(samples)
     ez_re_idx = task_names.index("Re{Ez}")
     ez_im_idx = task_names.index("Im{Ez}")
     t_idx = task_names.index("T")
