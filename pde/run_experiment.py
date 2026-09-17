@@ -203,7 +203,7 @@ def _build_pde_coupling(args, method: str, N: int, device, seed: int) -> torch.T
     return build_coupling_matrix(N, mode=cfg["coupling_mode"], device=device)
 
 
-def _te_heat_theta_from_dataset(train_ds, task_names: List[str], device, seed: int, n_samples: int) -> float:
+def _te_heat_theta_from_dataset(train_ds, task_names: List[str], device, seed: int, n_samples: int, return_components: bool = False,):
     gen = torch.Generator().manual_seed(seed)
     n = min(n_samples, len(train_ds))
     idxs = torch.randperm(len(train_ds), generator=gen)[:n].tolist()
@@ -217,7 +217,7 @@ def _te_heat_theta_from_dataset(train_ds, task_names: List[str], device, seed: i
     Ez_im = batch["tasks"][ez_im_idx][:, 0].to(device)
     T_field = batch["tasks"][t_idx][:, 0].to(device)
     elliptic_params = batch["elliptic_params"].to(device)
-    return te_heat_directional_asymmetry(mater, Ez_re, Ez_im, T_field, elliptic_params)
+    return te_heat_directional_asymmetry(mater, Ez_re, Ez_im, T_field, elliptic_params, return_components=return_components,)
 
 
 def _build_pde_skew(args, N: int, device, train_ds=None, task_names=None) -> Optional[torch.Tensor]:

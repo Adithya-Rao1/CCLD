@@ -184,8 +184,8 @@ def te_heat_residual(
 
 def te_heat_directional_asymmetry(
     mater: torch.Tensor, Ez_re: torch.Tensor, Ez_im: torch.Tensor, T: torch.Tensor,
-    elliptic_params: torch.Tensor,
-) -> float:
+    elliptic_params: torch.Tensor, return_components: bool = False,
+):
     Ez_re = Ez_re.detach().clone().requires_grad_(True)
     Ez_im = Ez_im.detach().clone().requires_grad_(True)
     T_leaf = T.detach().clone().requires_grad_(True)
@@ -202,6 +202,7 @@ def te_heat_directional_asymmetry(
     m_E_from_T = torch.sqrt(dRE_re_dT.pow(2).mean() + dRE_im_dT.pow(2).mean())
 
     denom = (m_T_from_E + m_E_from_T).item()
-    if denom < 1e-12:
-        return 0.0
-    return ((m_T_from_E - m_E_from_T) / denom).item()
+    theta = 0.0 if denom < 1e-12 else ((m_T_from_E - m_E_from_T) / denom).item()
+    if return_components:
+        return theta, m_T_from_E.item(), m_E_from_T.item()
+    return theta
