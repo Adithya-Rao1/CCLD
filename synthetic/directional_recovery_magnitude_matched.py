@@ -10,74 +10,40 @@ import synthetic.pairwise_n_sweep as pns
 from core.coupling import build_coupling_matrix
 from core.reporting import write_csv
 from core.stats import aggregate_over_seeds, compare_configs
-from synthetic.drift_coupled_gamma import calibrate_coupled_gammas_spectral
-from synthetic.exact_dsm import _extract_Avx_Avv_coupled_gamma
+from synthetic.directional_recovery_experiment import build_generic_skew, build_structured_skew, cross_block_asymmetry_metrics
 from synthetic.ground_truth_sde import make_directional_ground_truth
-from synthetic.metrics import fit_gaussian
-from synthetic.skew_coupling import parametrize_skew_matrix
 
 N_ORIG_SWEEP = [2, 3, 4]
 COUPLING_STRENGTH = 0.6
 LAG_DELTA = 0.5
-SKEW_SCALE = 1.0
+STRUCTURED_SCALE = 1.0
 SEEDS = [0, 1, 2, 3, 4]
 N_TRAIN_ITERS_SWEEP = [100, 300, 1000, 2000]
 N_SAMPLES = 4000
 N_DIFF_STEPS = 32
-SAMPLER = "euler"
-OUT_DIR = "results/experiment_3_synthetic/directional_recovery"
+SAMPLER = "exact"
+OUT_DIR = "results/experiment_3_synthetic/directional_recovery_magnitude_matched"
 
 
-def build_generic_skew(N_eff: int, seed: int, device, scale: float = SKEW_SCALE) -> torch.Tensor:
-    gen = torch.Generator().manual_seed(seed)
-    W = torch.randn(2 * N_eff, 2 * N_eff, generator=gen) * scale
-    return parametrize_skew_matrix(W).to(device)
+def match_frobenius_norm(J: torch.Tensor, target_norm: float) -> torch.Tensor:
+    current_norm = torch.linalg.norm(J)
+    if current_norm < 1e-12:
+        raise ValueError
+    return J * (target_norm / current_norm)
 
 
-def build_structured_skew(gt, coupling: torch.Tensor, device, scale: float = SKEW_SCALE) -> torch.Tensor:
-    N_orig, N_eff = gt.N_orig, gt.N
-    theta = gt.theta.to(device)
-    theta_antisym = theta - theta.T
-
-    Gamma = calibrate_coupled_gammas_spectral(
-        pns.ALPHA_V, pns.BETA, pns.K_REFERENCE, pns.K_REFERENCE, coupling, target_zeta=pns.TARGET_ZETA,
-    )
-    A_vx0, _ = _extract_Avx_Avv_coupled_gamma(
-        N_eff, None, None, [pns.ALPHA_V] * N_eff, [pns.BETA] * N_eff, pns.K_REFERENCE, coupling,
-        t=1, T=1, constant_k=True, time_scale_fn=lambda t, T: torch.tensor(1.0), damping_matrix=Gamma,
-    )
-    K = -A_vx0
-
-    pop_a, pop_b = slice(0, N_orig), slice(N_orig, N_eff)
-    K_cross = K[pop_a, pop_b]
-    Gamma_cross = Gamma[pop_a, pop_b]
-
-    X_orig, X_lag = slice(0, N_orig), slice(N_orig, N_eff)
-    V_orig, V_lag = slice(N_eff, N_eff + N_orig), slice(N_eff + N_orig, 2 * N_eff)
-    W = torch.zeros(2 * N_eff, 2 * N_eff, device=device)
-    W[X_orig, X_lag] = theta_antisym * scale  # XX
-    W[X_orig, V_lag] = (theta_antisym * K_cross) * scale  # XV
-    W[V_orig, X_lag] = (theta_antisym * K_cross) * scale  # VX
-    W[V_orig, V_lag] = (theta_antisym * Gamma_cross) * scale  # VV
-    return parametrize_skew_matrix(W)
-
-
-def cross_block_asymmetry_metrics(generated: torch.Tensor, gt) -> Dict[str, float]:
-    N_orig = gt.N_orig
-    _, cov_gen = fit_gaussian(generated.cpu())
-    cross_gen = cov_gen[:N_orig, N_orig:]
-    cross_true = gt.lagged_cross_covariance()
-    asym_gen = cross_gen - cross_gen.T
-    asym_true = cross_true - cross_true.T
-    asym_mae = (asym_gen - asym_true).abs().mean().item()
-    asym_true_mag = asym_true.abs().mean().item()
-    asym_gen_mag = asym_gen.abs().mean().item()
-    return {
-        "cross_asym_mae": asym_mae,
-        "cross_asym_true_mag": asym_true_mag,
-        "cross_asym_gen_mag": asym_gen_mag,
-        "cross_asym_recovery_pct": (asym_gen_mag / asym_true_mag * 100.0) if asym_true_mag > 1e-8 else float("nan"),
-    }
+def build_conditions_matched(gt, coupling: torch.Tensor, device) -> Tuple[List[Tuple[str, torch.Tensor]], float, float]:
+    J_structured = build_structured_skew(gt, coupling, device, scale=STRUCTURED_SCALE)
+    target_norm = torch.linalg.norm(J_structured).item()
+    J_generic_raw = build_generic_skew(gt.N, seed=0, device=device, scale=1.0)
+    J_generic_matched = match_frobenius_norm(J_generic_raw, target_norm)
+    generic_norm = torch.linalg.norm(J_generic_matched).item()
+    conditions = [
+        ("symmetric_only", None),
+        ("skew_structured", J_structured),
+        ("skew_generic_matched", J_generic_matched),
+    ]
+    return conditions, target_norm, generic_norm
 
 
 def run() -> List[Dict]:
@@ -87,7 +53,7 @@ def run() -> List[Dict]:
     pns.DT = 1.0 / N_DIFF_STEPS
     pns.COUPLING_STRENGTH = COUPLING_STRENGTH
 
-    summary_rows, per_seed_rows, sig_rows = [], [], []
+    norm_rows, summary_rows, per_seed_rows, sig_rows = [], [], [], []
 
     for N_orig in N_ORIG_SWEEP:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -95,11 +61,9 @@ def run() -> List[Dict]:
         N_eff = gt.N
         coupling = build_coupling_matrix(N_eff, mode="mean_field", device=device)
 
-        conditions: List[Tuple[str, torch.Tensor]] = [
-            ("symmetric_only", None),
-            ("skew_generic", build_generic_skew(N_eff, seed=0, device=device, scale=SKEW_SCALE)),
-            ("skew_structured", build_structured_skew(gt, coupling, device, scale=SKEW_SCALE)),
-        ]
+        conditions, target_norm, generic_norm = build_conditions_matched(gt, coupling, device)
+        norm_rows.append({"N_orig": N_orig, "structured_norm": target_norm, "generic_matched_norm": generic_norm})
+        print(f"N_orig={N_orig}: ||J_structured||_F={target_norm:.4f}  ||J_generic_matched||_F={generic_norm:.4f}")
 
         for n_train_iters in N_TRAIN_ITERS_SWEEP:
             pns.N_TRAIN_ITERS = n_train_iters
@@ -109,7 +73,7 @@ def run() -> List[Dict]:
                 per_seed = {}
                 for seed in SEEDS:
                     metrics, generated = pns.train_one_seed(
-                        N_eff, coupling, seed, label=f"dir/{label}/iters{n_train_iters}", skew_matrix=skew_matrix,
+                        N_eff, coupling, seed, label=f"matched/{label}/iters{n_train_iters}", skew_matrix=skew_matrix,
                         gt=gt, return_samples=True, sampler=SAMPLER,
                     )
                     metrics.update(cross_block_asymmetry_metrics(generated, gt))
@@ -139,31 +103,32 @@ def run() -> List[Dict]:
                 for metric, s in sig.items():
                     sig_rows.append({"N_orig": N_orig, "n_train_iters": n_train_iters, "comparison": f"{label}_vs_symmetric_only", "metric": metric, **s})
 
+    write_csv(norm_rows, os.path.join(OUT_DIR, "matched_norms.csv"))
     write_csv(per_seed_rows, os.path.join(OUT_DIR, "directional_recovery_per_seed.csv"))
     write_csv(summary_rows, os.path.join(OUT_DIR, "directional_recovery_summary.csv"))
     write_csv(sig_rows, os.path.join(OUT_DIR, "directional_recovery_significance.csv"))
 
-    print("\n\nSUMMARY: symmetric_only vs skew_generic vs skew_structured, KL vs training budget")
-    print(f"{'N_orig':>6} {'iters':>6} {'condition':>16} {'KL':>10} {'asym_recovery%':>16} {'asym_mae':>10}")
+    print("\n\nSUMMARY: symmetric_only vs skew_structured vs skew_generic_matched (equal Frobenius norm), KL vs training budget")
+    print(f"{'N_orig':>6} {'iters':>6} {'condition':>22} {'KL':>10} {'asym_recovery%':>16} {'asym_mae':>10}")
     for row in summary_rows:
-        print(f"{row['N_orig']:>6} {row['n_train_iters']:>6} {row['condition']:>16} {row['kl_mean']:>10.4f} "
+        print(f"{row['N_orig']:>6} {row['n_train_iters']:>6} {row['condition']:>22} {row['kl_mean']:>10.4f} "
               f"{row['cross_asym_recovery_pct_mean']:>16.1f} {row['cross_asym_mae_mean']:>10.4f}")
     print(f"\nWrote results to {OUT_DIR}/")
     return summary_rows
 
 
 def parse_args(argv=None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Directional (asymmetric-theta) ground-truth recovery vs training budget: symmetric-only vs skew-augmented CCLD")
+    p = argparse.ArgumentParser(description="Same magnitude skew matrices but stationary distribution invariant.")
     p.add_argument("--seeds", default="0,1,2,3,4")
     p.add_argument("--n-train-iters-sweep", default="100,300,1000,2000")
     p.add_argument("--n-samples", type=int, default=4000)
     p.add_argument("--n-orig-sweep", default="2,3,4")
     p.add_argument("--n-diff-steps", type=int, default=32)
-    p.add_argument("--skew-scale", type=float, default=1.0)
+    p.add_argument("--structured-scale", type=float, default=1.0)
     p.add_argument("--lag-delta", type=float, default=0.5)
-    p.add_argument("--sampler", default="euler", choices=["euler", "exact"])
-    p.add_argument("--out-dir", default="results/experiment_3_synthetic/directional_recovery")
-    p.add_argument("--quick", action="store_true", help="tiny scale for smoke-testing the pipeline end-to-end")
+    p.add_argument("--sampler", default="exact", choices=["euler", "exact"])
+    p.add_argument("--out-dir", default="results/experiment_3_synthetic/recovery_magnitude_matched")
+    p.add_argument("--quick", action="store_true")
     return p.parse_args(argv)
 
 
@@ -174,7 +139,7 @@ if __name__ == "__main__":
     N_SAMPLES = _args.n_samples
     N_ORIG_SWEEP = [int(n) for n in _args.n_orig_sweep.split(",") if n.strip()]
     N_DIFF_STEPS = _args.n_diff_steps
-    SKEW_SCALE = _args.skew_scale
+    STRUCTURED_SCALE = _args.structured_scale
     LAG_DELTA = _args.lag_delta
     SAMPLER = _args.sampler
     OUT_DIR = _args.out_dir

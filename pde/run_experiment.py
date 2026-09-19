@@ -33,7 +33,10 @@ from synthetic.exact_dsm import (
 )
 from synthetic.skew_coupling import parametrize_skew_matrix, reference_stationary_covariance
 from pde.dataset import ALL_PROBLEMS, MultiPhysicsFieldDataset, collate_fn, _get_or_create_target_norm_stats
-from pde.pde_residuals import e_flow_residual, pde_residual_metric, te_heat_normalize_mater, te_heat_residual, va_residual
+from pde.pde_residuals import (
+    e_flow_residual, pde_residual_metric, te_heat_directional_asymmetry, te_heat_normalize_mater, te_heat_residual,
+    va_residual,
+)
 
 
 def _normalize_targets(targets, target_mean, target_std):
@@ -95,8 +98,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--n-tasks", type=int, default=None)
     p.add_argument("--task-subset", default=None, help="comma-separated explicit task-name override")
     p.add_argument("--method", default="ccld", choices=ALL_METHODS)
-    p.add_argument("--damping-regime", default="critically_damped",
-                    choices=["underdamped", "critically_damped", "overdamped"])
+    p.add_argument("--damping-regime", default="critically_damped", choices=["underdamped", "critically_damped", "overdamped"])
     p.add_argument("--target-zeta", type=float, default=None)
     p.add_argument("--coupling-family", default="mean_field", choices=["mean_field", "block", "random_heterogeneous"],)
     p.add_argument("--coupling-block-sizes", default=None,)
@@ -106,6 +108,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--skew-coupling-family", default="none", choices=["none", "random", "te_heat_physics"],)
     p.add_argument("--skew-coupling-scale", type=float, default=1.0)
     p.add_argument("--skew-coupling-seed", type=int, default=0)
+    p.add_argument("--theta-data-seed", type=int, default=0)
+    p.add_argument("--theta-data-n-samples", type=int, default=256)
     p.add_argument("--alpha", default="1.0")
     p.add_argument("--beta", default="0.5")
     p.add_argument("--k-reference", type=float, default=1.0,)
@@ -123,14 +127,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--n-downsample", type=int, default=3)
     p.add_argument("--score-blocks", type=int, default=3)
     p.add_argument("--score-heads", type=int, default=4)
-    p.add_argument("--score-arch", default="attention", choices=["attention", "fno", "unet_model"],
-                    help="'attention' = existing pooled-latent MultiPhysicsScoreNetwork; "
-                         "'fno'/'unet_model' = native-pixel-diffusion (X+V-conditioned) score networks")
+    p.add_argument("--score-arch", default="attention", choices=["attention", "fno", "unet_model"],)
     p.add_argument("--fno-modes", default="12,12")
     p.add_argument("--fno-hidden-channels", type=int, default=128)
-    p.add_argument("--fno-init-channels", type=int, default=32,
-                    help="SpatialFieldModel's init-head hidden channels -- shared by fno and unet_model, "
-                         "both use the same native-pixel-diffusion state representation")
+    p.add_argument("--fno-init-channels", type=int, default=32,)
     p.add_argument("--unet-model-channels", type=int, default=32)
     p.add_argument("--unet-channel-mult", default="1,2,2")
     p.add_argument("--unet-num-blocks", type=int, default=2)
@@ -203,7 +203,24 @@ def _build_pde_coupling(args, method: str, N: int, device, seed: int) -> torch.T
     return build_coupling_matrix(N, mode=cfg["coupling_mode"], device=device)
 
 
-def _build_pde_skew(args, N: int, device) -> Optional[torch.Tensor]:
+def _te_heat_theta_from_dataset(train_ds, task_names: List[str], device, seed: int, n_samples: int, return_components: bool = False,):
+    gen = torch.Generator().manual_seed(seed)
+    n = min(n_samples, len(train_ds))
+    idxs = torch.randperm(len(train_ds), generator=gen)[:n].tolist()
+    samples = [train_ds[i] for i in tqdm(idxs, desc="theta_TE: loading samples")]
+    batch = collate_fn(samples)
+    ez_re_idx = task_names.index("Re{Ez}")
+    ez_im_idx = task_names.index("Im{Ez}")
+    t_idx = task_names.index("T")
+    mater = batch["conditioning"][:, 0].to(device)
+    Ez_re = batch["tasks"][ez_re_idx][:, 0].to(device)
+    Ez_im = batch["tasks"][ez_im_idx][:, 0].to(device)
+    T_field = batch["tasks"][t_idx][:, 0].to(device)
+    elliptic_params = batch["elliptic_params"].to(device)
+    return te_heat_directional_asymmetry(mater, Ez_re, Ez_im, T_field, elliptic_params, return_components=return_components,)
+
+
+def _build_pde_skew(args, N: int, device, train_ds=None, task_names=None) -> Optional[torch.Tensor]:
     if args.skew_coupling_family == "none":
         return None
     if args.skew_coupling_family == "random":
@@ -213,9 +230,17 @@ def _build_pde_skew(args, N: int, device) -> Optional[torch.Tensor]:
     if args.skew_coupling_family == "te_heat_physics":
         if N != 3:
             raise ValueError
+        if train_ds is None or task_names is None:
+            raise ValueError
+        theta_te = _te_heat_theta_from_dataset(
+            train_ds, task_names, device, seed=args.theta_data_seed, n_samples=args.theta_data_n_samples,
+        )
+        ez_re_idx = task_names.index("Re{Ez}")
+        ez_im_idx = task_names.index("Im{Ez}")
+        t_idx = task_names.index("T")
         W = torch.zeros(2 * N, 2 * N, device=device)
-        W[0, 5] = args.skew_coupling_scale
-        W[1, 5] = args.skew_coupling_scale
+        W[ez_re_idx, N + t_idx] = theta_te * args.skew_coupling_scale
+        W[ez_im_idx, N + t_idx] = theta_te * args.skew_coupling_scale
         return parametrize_skew_matrix(W)
     raise ValueError
 
@@ -504,7 +529,7 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
         )
         skew_matrix = skew_sigma_ref = params_skew = None
         if args.method == "ccld_pairwise":
-            skew_matrix = _build_pde_skew(args, N, device)
+            skew_matrix = _build_pde_skew(args, N, device, train_ds=train_ds, task_names=task_names)
             if skew_matrix is not None:
                 A_vx0, _ = _extract_Avx_Avv_coupled_gamma(
                     N, None, None, args.alpha_list, args.beta_list, args.k_reference, coupling,

@@ -23,6 +23,23 @@ def inject_skew_coupling(A0: torch.Tensor, Sigma_ref: torch.Tensor, J: torch.Ten
     return A0 - J @ torch.linalg.inv(Sigma_ref)
 
 
+def inject_skew_coupling_additive(A0: torch.Tensor, J: torch.Tensor) -> torch.Tensor:
+    if not torch.allclose(J, -J.T, atol=1e-5):
+        raise ValueError
+    return A0 - J
+
+
+def stationary_covariance_from_drift(A0_new: torch.Tensor, Q: torch.Tensor) -> torch.Tensor:
+    from scipy.linalg import solve_continuous_lyapunov
+    max_real_eig = torch.linalg.eigvals(A0_new).real.max().item()
+    if max_real_eig >= 0:
+        raise ValueError
+    a = A0_new.double().cpu().numpy()
+    q = (-Q).double().cpu().numpy()
+    cov = solve_continuous_lyapunov(a, q)
+    return torch.as_tensor((cov + cov.T) / 2, dtype=A0_new.dtype, device=A0_new.device)
+
+
 def skew_drift_correction(
     X: List[List[torch.Tensor]], V: List[List[torch.Tensor]],
     J: torch.Tensor, Sigma_ref: torch.Tensor,

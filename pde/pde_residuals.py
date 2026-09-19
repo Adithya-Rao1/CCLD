@@ -180,3 +180,29 @@ def te_heat_residual(
     result_T = (rho_map * laplace_T + 0.5 * sigma_map * (Ez * torch.conj(Ez))).real
 
     return {"e_field": result_E / e_field_scale, "heat": result_T / heat_scale}
+
+
+def te_heat_directional_asymmetry(
+    mater: torch.Tensor, Ez_re: torch.Tensor, Ez_im: torch.Tensor, T: torch.Tensor,
+    elliptic_params: torch.Tensor, return_components: bool = False,
+):
+    Ez_re = Ez_re.detach().clone().requires_grad_(True)
+    Ez_im = Ez_im.detach().clone().requires_grad_(True)
+    T_leaf = T.detach().clone().requires_grad_(True)
+    fields = {"mater": mater.detach(), "T": T_leaf, "Ez_re": Ez_re, "Ez_im": Ez_im}
+    residuals = te_heat_residual(fields, elliptic_params)
+    R_heat = residuals["heat"]
+    R_e = residuals["e_field"]
+
+    dRT_dEzre, dRT_dEzim = torch.autograd.grad(R_heat.sum(), [Ez_re, Ez_im], retain_graph=True)
+    m_T_from_E = torch.sqrt(dRT_dEzre.pow(2).mean() + dRT_dEzim.pow(2).mean())
+
+    dRE_re_dT, = torch.autograd.grad(R_e.real.sum(), [T_leaf], retain_graph=True)
+    dRE_im_dT, = torch.autograd.grad(R_e.imag.sum(), [T_leaf], retain_graph=False)
+    m_E_from_T = torch.sqrt(dRE_re_dT.pow(2).mean() + dRE_im_dT.pow(2).mean())
+
+    denom = (m_T_from_E + m_E_from_T).item()
+    theta = 0.0 if denom < 1e-12 else ((m_T_from_E - m_E_from_T) / denom).item()
+    if return_components:
+        return theta, m_T_from_E.item(), m_E_from_T.item()
+    return theta
