@@ -45,6 +45,7 @@ SEEDS = [0, 1, 2, 3, 4]
 N_SWEEP = [2, 3, 4, 5]
 OUT_DIR = "results/experiment_3_synthetic/anderson_analytic_n_sweep"
 BASELINE_DIR = "results/experiment_3_synthetic/exact_prior_std_sweep"
+METHOD_LABEL = "ccld_analytic"
 
 
 def _g_fn(N: int, sigma_ab: Tuple[float, float], coupling, device):
@@ -163,14 +164,14 @@ def run():
         for seed in SEEDS:
             m = train_one_seed(N, seed)
             per_seed[seed] = m
-            per_seed_rows.append({"N": N, "method": "ccld_analytic", "seed": seed, **m})
+            per_seed_rows.append({"N": N, "method": METHOD_LABEL, "seed": seed, **m})
             print(f"  seed={seed}: kl={m['kl_divergence']:.4f} corr_gen={m['mean_pairwise_corr_gen']:.4f} corr_true={m['mean_pairwise_corr_true']:.4f}")
 
         ccld_summary = aggregate_over_seeds(per_seed)
         for metric, stats in ccld_summary.items():
-            all_rows.append({"N": N, "method": "ccld_analytic", "metric": metric, **stats})
+            all_rows.append({"N": N, "method": METHOD_LABEL, "metric": metric, **stats})
 
-        for method_name, s in [("ddpm", ddpm), ("sdm", sdm), ("ccld_analytic", ccld_summary)]:
+        for method_name, s in [("ddpm", ddpm), ("sdm", sdm), (METHOD_LABEL, ccld_summary)]:
             summary_rows.append({
                 "N": N, "method": method_name,
                 "kl_mean": s["kl_divergence"]["mean"], "kl_std": s["kl_divergence"]["std"],
@@ -183,7 +184,7 @@ def run():
         for baseline_name, baseline_per_seed in [("ddpm", ddpm_per_seed), ("sdm", sdm_per_seed)]:
             sig = compare_configs(baseline_per_seed, per_seed, metric_names=sig_metric_names)
             for metric, s in sig.items():
-                sig_rows.append({"N": N, "comparison": f"ccld_analytic_vs_{baseline_name}", "metric": metric, **s})
+                sig_rows.append({"N": N, "comparison": f"{METHOD_LABEL}_vs_{baseline_name}", "metric": metric, **s})
 
     write_csv(per_seed_rows, os.path.join(OUT_DIR, "analytic_n_sweep_per_seed.csv"))
     write_csv(sig_rows, os.path.join(OUT_DIR, "analytic_n_sweep_significance.csv"))
@@ -214,6 +215,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--dt", type=float, default=None)
     p.add_argument("--out-dir", default="results/experiment_3_synthetic/anderson_analytic_n_sweep")
     p.add_argument("--baseline-dir", default="results/experiment_3_synthetic/exact_prior_std_sweep")
+    p.add_argument("--coupling-strength", type=float, default=0.6, help="ground-truth coupling strength")
+    p.add_argument("--beta", type=float, default=1.0, help="model's coupling weight; beta=0.0 gives an uncoupled-CLD baseline")
+    p.add_argument("--method-label", default="ccld_analytic", help="label used for this run's method column/comparisons")
     return p.parse_args(argv)
 
 
@@ -227,4 +231,7 @@ if __name__ == "__main__":
     BASELINE_DIR = _args.baseline_dir
     N_DIFF_STEPS = _args.n_diff_steps
     DT = _args.dt if _args.dt is not None else 1.0 / N_DIFF_STEPS
+    COUPLING_STRENGTH = _args.coupling_strength
+    BETA = _args.beta
+    METHOD_LABEL = _args.method_label
     run()
