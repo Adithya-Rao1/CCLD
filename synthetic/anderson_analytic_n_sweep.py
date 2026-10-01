@@ -46,7 +46,7 @@ N_SWEEP = [2, 3, 4, 5]
 OUT_DIR = "results/experiment_3_synthetic/anderson_analytic_n_sweep"
 BASELINE_DIR = "results/experiment_3_synthetic/exact_prior_std_sweep"
 METHOD_LABEL = "ccld_analytic"
-SILOED_SCORE_NET = True
+SILOED_SCORE_NET = False
 
 
 def _g_fn(N: int, sigma_ab: Tuple[float, float], coupling, device):
