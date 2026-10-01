@@ -15,7 +15,7 @@ from synthetic.anderson_sde import anderson_em_step_coupled_gamma, anderson_reve
 from synthetic.drift_coupled_gamma import calibrate_coupled_gammas, calibrate_sigma_fdt_coupled
 from synthetic.exact_dsm import elapsed_time_at_step, precompute_transition_params, sample_and_analytic_score_target
 from synthetic.ground_truth_sde import GroundTruthCoupledOU, make_ground_truth
-from synthetic.run_experiment import CoupledScoreNet, _make_conditioning, evaluate_sampling_quality
+from synthetic.run_experiment import CoupledScoreNet, SiloedCoupledScoreNet, _make_conditioning, evaluate_sampling_quality
 
 def _constant_tau_time_scale(t, T) -> torch.Tensor:
     return torch.tensor(2.0)
@@ -46,6 +46,7 @@ N_SWEEP = [2, 3, 4, 5]
 OUT_DIR = "results/experiment_3_synthetic/anderson_analytic_n_sweep"
 BASELINE_DIR = "results/experiment_3_synthetic/exact_prior_std_sweep"
 METHOD_LABEL = "ccld_analytic"
+SILOED_SCORE_NET = True
 
 
 def _g_fn(N: int, sigma_ab: Tuple[float, float], coupling, device):
@@ -83,7 +84,8 @@ def train_ccld_analytic(N: int, sigma_ab: Tuple[float, float], gt: GroundTruthCo
         N_DIFF_STEPS, DT, g_fn, True, TIME_SCALE_FN,
     )
 
-    score_net = CoupledScoreNet(N, 64, 3, 16).to(device)
+    net_cls = SiloedCoupledScoreNet if SILOED_SCORE_NET else CoupledScoreNet
+    score_net = net_cls(N, 64, 3, 16).to(device)
     optimizer = torch.optim.Adam(score_net.parameters(), lr=1e-3)
 
     for _ in range(N_TRAIN_ITERS):
@@ -218,6 +220,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--coupling-strength", type=float, default=0.6, help="ground-truth coupling strength")
     p.add_argument("--beta", type=float, default=1.0, help="model's coupling weight; beta=0.0 gives an uncoupled-CLD baseline")
     p.add_argument("--method-label", default="ccld_analytic", help="label used for this run's method column/comparisons")
+    p.add_argument("--siloed-score-net", action="store_true", help="use decoupled score network")
     return p.parse_args(argv)
 
 
@@ -234,4 +237,5 @@ if __name__ == "__main__":
     COUPLING_STRENGTH = _args.coupling_strength
     BETA = _args.beta
     METHOD_LABEL = _args.method_label
+    SILOED_SCORE_NET = _args.siloed_score_net
     run()

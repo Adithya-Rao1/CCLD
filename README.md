@@ -63,9 +63,42 @@ hitting the floor. This coincides with SGM consistently over-estimating the true
 5--13\% independent of step count. Interestingly, SGM's raw KL divergence is significantly lower
 than CCLD's at every $N$ with $p\le0.02$ at the smallest budget of $n=8$. This indicates the
 step-efficiency advantage observed against DDPM does not extend to SGM in the same regime. These
-results are limited to a single coupling strength 0.6, mean-field coupling only, and $N\le5$. Thus,
-future work aims to test whether the same pattern holds under heterogeneous coupling and larger
-$N$.
+results are limited to a single coupling strength 0.6 and $N\le5$; the following subsection
+reports results under non-mean-field coupling, and coupling strength remains open.
+
+### Non-mean-field (antisymmetric) coupling
+
+The results above use mean-field coupling (every pair of populations coupled identically). We
+extend CCLD to break this symmetry via a decomposition of the drift into a symmetric (dissipative)
+component $D$ and an antisymmetric (circulating) component $J$, $A_0 = (D+J)\Sigma_{\mathrm{ref}}^{-1}$
+with $J+J^\top=0$: $D$ alone, fixed by the fluctuation-dissipation relation, is responsible for
+matching the model's stationary covariance, so adding any such $J$ leaves the target distribution
+exactly unchanged and only reshapes the transient path toward it. We construct $J$ from the
+model's own architecture parameters ($K_{\mathrm{self}}$, $\Gamma$) Hadamard-weighted by an
+antisymmetric belief matrix, requiring no information beyond what CCLD already uses, and compare
+against two controls at matched Frobenius norm: `symmetric_only` ($J=0$, the mean-field drift
+above) and `skew_generic_matched` (an unstructured antisymmetric perturbation of identical
+magnitude, isolating the effect of structure from the effect of size alone).
+
+Across $N=2,3,4,5$, 5 step-count budgets ($n\in\{8,16,32,64,128\}$), and 10 seeds (1600 training
+runs total across both samplers and all conditions), `skew_structured` achieves lower mean KL
+divergence than `symmetric_only` in 19 of 20 $(N,n)$ combinations under the exact (Van Loan)
+sampler, reaching significance ($p\le0.01$, paired Wilcoxon) at $N=2,3,4$ for the coarsest budget
+$n=8$, where the effect is also largest in absolute terms ($\Delta\mathrm{KL}\approx-0.04$ to
+$-0.05$ vs. $-0.002$ to $-0.004$ at $n=128$). The matched-magnitude unstructured control
+`skew_generic_matched` shows no corresponding pattern, indicating the gain is attributable to the
+antisymmetric component's structure rather than its magnitude. The one exception is reported
+rather than omitted: at $N=5, n=16$, `skew_structured` is significantly *worse* ($p=0.002$);
+tracing `symmetric_only`'s own KL across step counts shows it, not `skew_structured`, as the
+outlier at that cell, consistent with ordinary training variance on the single largest problem in
+the grid rather than a real interaction.
+
+This pattern is sampler-dependent: evaluated under Euler-Maruyama instead of the exact integrator,
+the ranking *inverts* at the coarsest step counts (`skew_generic_matched` wins at every $N$ for
+$n=8$) before recovering by $n\ge32$, consistent with the antisymmetric/circulating drift term
+having a smaller Euler-Maruyama stability region rather than a representational limitation. We
+report the exact sampler above for this reason, and flag it for anyone deploying this mechanism
+with a standard Euler reverse-SDE sampler at a small step budget.
 
 ### Coupled PDE field reconstruction
 
@@ -152,4 +185,8 @@ done
 For the full sweep across 10 seeds, run: `bash run_pde_baselines.sh`.
 
 ## Future Work
-We are currently focusing on implementing asymmetric coupling to induce stronger biases in the forward dynamics, as well as designing more efficient sampling methods to reduce discretization errors arising from the score term.
+Open directions include testing whether the coupling advantage generalizes to coupling strengths
+other than the single value (0.6) used above, isolating the coupling term's effect from velocity
+augmentation/critical damping via an uncoupled-CLD baseline, extending non-mean-field coupling to
+the PDE task, and designing more efficient sampling methods to reduce discretization errors
+arising from the score term.
