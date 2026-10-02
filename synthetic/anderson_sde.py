@@ -187,7 +187,7 @@ def anderson_exact_reverse_step_coupled_gamma(
     Psi_rev = Psi_rev.to(device=device, dtype=dtype)
 
     scale = Sigma_rev.diagonal().abs().max().clamp_min(1.0)
-    Sigma_reg = Sigma_rev + 1e-6 * scale * torch.eye(2 * N, dtype=Sigma_rev.dtype)
+    Sigma_reg = Sigma_rev + 1e-6 * scale * torch.eye(2 * N, dtype=Sigma_rev.dtype, device=Sigma_rev.device)
     L_chol = torch.linalg.cholesky(Sigma_reg).to(device=device, dtype=dtype)
 
     G_dt = G.to(device=device, dtype=dtype)
