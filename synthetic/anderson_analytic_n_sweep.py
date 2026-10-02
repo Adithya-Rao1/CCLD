@@ -11,9 +11,13 @@ from core.coupling import build_coupling_matrix
 from core.reporting import write_csv, write_json
 from core.sde import build_g_matrix_n
 from core.stats import aggregate_over_seeds, compare_configs
-from synthetic.anderson_sde import anderson_em_step_coupled_gamma, anderson_reverse_step_coupled_gamma
+from synthetic.anderson_sde import (
+    anderson_em_step_coupled_gamma, anderson_exact_reverse_step_coupled_gamma, anderson_reverse_step_coupled_gamma,
+)
 from synthetic.drift_coupled_gamma import calibrate_coupled_gammas, calibrate_sigma_fdt_coupled
-from synthetic.exact_dsm import elapsed_time_at_step, precompute_transition_params, sample_and_analytic_score_target
+from synthetic.exact_dsm import (
+    closed_form_propagator, elapsed_time_at_step, precompute_transition_params, sample_and_analytic_score_target,
+)
 from synthetic.ground_truth_sde import GroundTruthCoupledOU, make_ground_truth
 from synthetic.run_experiment import CoupledScoreNet, SiloedCoupledScoreNet, _make_conditioning, evaluate_sampling_quality
 
@@ -47,6 +51,7 @@ OUT_DIR = "results/experiment_3_synthetic/anderson_analytic_n_sweep"
 BASELINE_DIR = "results/experiment_3_synthetic/exact_prior_std_sweep"
 METHOD_LABEL = "ccld_analytic"
 SILOED_SCORE_NET = False
+SAMPLER = "euler"
 
 
 def _g_fn(N: int, sigma_ab: Tuple[float, float], coupling, device):
@@ -79,10 +84,20 @@ def train_ccld_analytic(N: int, sigma_ab: Tuple[float, float], gt: GroundTruthCo
     gamma_self, gamma_couple = calibrate_coupled_gammas(ALPHA_V, BETA, K_REFERENCE, K_REFERENCE, N, target_zeta=TARGET_ZETA)
     g_fn = _g_fn(N, sigma_ab, coupling, device)
 
-    params = precompute_transition_params(
-        N, gamma_self, gamma_couple, [ALPHA_V] * N, [BETA] * N, K_REFERENCE, coupling,
-        N_DIFF_STEPS, DT, g_fn, True, TIME_SCALE_FN,
-    )
+    if SAMPLER == "exact":
+        params = [
+            closed_form_propagator(
+                N, gamma_self, gamma_couple, [ALPHA_V] * N, [BETA] * N, K_REFERENCE, coupling,
+                tau_hat=elapsed_time_at_step(t_idx, N_DIFF_STEPS, DT, TIME_SCALE_FN),
+                constant_k=True, G0=g_fn(t_idx, N_DIFF_STEPS),
+            )
+            for t_idx in range(1, N_DIFF_STEPS + 1)
+        ]
+    else:
+        params = precompute_transition_params(
+            N, gamma_self, gamma_couple, [ALPHA_V] * N, [BETA] * N, K_REFERENCE, coupling,
+            N_DIFF_STEPS, DT, g_fn, True, TIME_SCALE_FN,
+        )
 
     net_cls = SiloedCoupledScoreNet if SILOED_SCORE_NET else CoupledScoreNet
     score_net = net_cls(N, 64, 3, 16).to(device)
@@ -121,11 +136,18 @@ def sample_ccld_anderson(N: int, sigma_ab: Tuple[float, float], score_net, gamma
 
     for t_idx in reversed(range(1, N_DIFF_STEPS + 1)):
         score_outputs = score_net(X, V, t_idx)
-        X, V = anderson_reverse_step_coupled_gamma(
-            X, V, K_self, K_global, score_outputs, t_idx, N_DIFF_STEPS,
-            [ALPHA_V] * N, [BETA] * N, gamma_self, gamma_couple, coupling, True, DT,
-            g_fn(t_idx, N_DIFF_STEPS), time_scale_fn=TIME_SCALE_FN,
-        )
+        if SAMPLER == "exact":
+            X, V = anderson_exact_reverse_step_coupled_gamma(
+                X, V, K_self, K_global, score_outputs, t_idx, N_DIFF_STEPS,
+                [ALPHA_V] * N, [BETA] * N, gamma_self, gamma_couple, coupling,
+                K_REFERENCE, DT, g_fn(t_idx, N_DIFF_STEPS), time_scale_fn=TIME_SCALE_FN,
+            )
+        else:
+            X, V = anderson_reverse_step_coupled_gamma(
+                X, V, K_self, K_global, score_outputs, t_idx, N_DIFF_STEPS,
+                [ALPHA_V] * N, [BETA] * N, gamma_self, gamma_couple, coupling, True, DT,
+                g_fn(t_idx, N_DIFF_STEPS), time_scale_fn=TIME_SCALE_FN,
+            )
     return torch.cat([X[i][0] for i in range(N)], dim=-1)
 
 
@@ -221,6 +243,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--beta", type=float, default=1.0, help="model's coupling weight; beta=0.0 gives an uncoupled-CLD baseline")
     p.add_argument("--method-label", default="ccld_analytic", help="label used for this run's method column/comparisons")
     p.add_argument("--siloed-score-net", action="store_true", help="use decoupled score network")
+    p.add_argument("--sampler", default="euler", choices=["euler", "exact"], help="exact uses the Van Loan matrix-exponential propagator for both training target and reverse sampling -- no discretization error in the deterministic drift")
     return p.parse_args(argv)
 
 
@@ -238,4 +261,5 @@ if __name__ == "__main__":
     BETA = _args.beta
     METHOD_LABEL = _args.method_label
     SILOED_SCORE_NET = _args.siloed_score_net
+    SAMPLER = _args.sampler
     run()

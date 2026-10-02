@@ -11,8 +11,8 @@ from core.reporting import write_csv
 from core.stats import aggregate_over_seeds, compare_configs
 from pde.run_experiment import _build_pde_skew, make_dataset, parse_args, train_one_seed
 
-CONDITIONS = ["symmetric_only", "skew_structured", "skew_generic_matched", "ddpm", "sdm"]
-CCLD_CONDITIONS = ["symmetric_only", "skew_structured", "skew_generic_matched"]
+CONDITIONS = ["symmetric_only", "skew_structured", "skew_generic_matched", "ccld_independent", "ddpm", "sdm"]
+CCLD_CONDITIONS = ["symmetric_only", "skew_structured", "skew_generic_matched", "ccld_independent"]
 BASELINE_CONDITIONS = ["ddpm", "sdm"]
 
 REL_L2_METRIC_KEYS_BY_PROBLEM = {"TE_heat": ["Re{Ez}_rel_l2", "Im{Ez}_rel_l2", "T_rel_l2"]}
@@ -71,6 +71,9 @@ def _condition_argv(label: str, args: argparse.Namespace, generic_scale: Optiona
         return base + ["--method", "ccld_pairwise", "--coupling-family", "mean_field", "--constant-k",
                         "--skew-coupling-family", "random", "--skew-coupling-scale", str(generic_scale),
                         "--skew-coupling-seed", str(args.generic_skew_seed)]
+    if label == "ccld_independent":
+        return base + ["--method", "ccld_pairwise", "--coupling-family", "mean_field", "--constant-k",
+                        "--skew-coupling-family", "none", "--beta", "0.0"]
     if label in BASELINE_CONDITIONS:
         return base + ["--method", label]
     raise ValueError(label)
