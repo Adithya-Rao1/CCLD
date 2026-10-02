@@ -464,17 +464,18 @@ def closed_form_propagator(
     )
     A_vx0 = A_vx0.to(dtype)
     A_vv0 = A_vv0.to(dtype)
+    device = A_vx0.device
 
-    J = torch.zeros(2 * N, 2 * N, dtype=dtype)
-    J[:N, N:] = torch.eye(N, dtype=dtype)
+    J = torch.zeros(2 * N, 2 * N, dtype=dtype, device=device)
+    J[:N, N:] = torch.eye(N, dtype=dtype, device=device)
     J[N:, :N] = A_vx0
     J[N:, N:] = A_vv0
 
-    L = torch.zeros(2 * N, N, dtype=dtype)
-    L[N:, :] = G0.to(dtype) if G0 is not None else sigma_ref * torch.eye(N, dtype=dtype)
+    L = torch.zeros(2 * N, N, dtype=dtype, device=device)
+    L[N:, :] = G0.to(dtype).to(device) if G0 is not None else sigma_ref * torch.eye(N, dtype=dtype, device=device)
     LLT = L @ L.T
 
-    M = torch.zeros(4 * N, 4 * N, dtype=dtype)
+    M = torch.zeros(4 * N, 4 * N, dtype=dtype, device=device)
     M[:2 * N, :2 * N] = J
     M[:2 * N, 2 * N:] = LLT
     M[2 * N:, 2 * N:] = -J.T
