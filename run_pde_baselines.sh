@@ -16,7 +16,7 @@ ENCODER_N_EPOCHS="${11:-${N_EPOCHS}}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
 
-OUT_DIR="results/experiment_2_physics/${PROBLEM}_${ARCH}"
+OUT_DIR="results/experiment_2_physics/${PROBLEM}_${ARCH}_ep${N_EPOCHS}_bs${BATCH_SIZE}_lr${LR}_steps${N_DIFF_STEPS}_seeds${SEEDS//,/-}"
 ENCODER_DIR="${OUT_DIR}/shared_encoders"
 mkdir -p "${OUT_DIR}"
 

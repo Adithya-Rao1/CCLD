@@ -15,10 +15,10 @@ for STEPS in "${STEP_COUNTS[@]}"; do
 done
 
 STEP_COUNTS_CSV=$(IFS=,; echo "${STEP_COUNTS[*]}")
-SWEEP_OUT_DIR="results/experiment_3_synthetic/stepcount_sweep_seeds${N_SEEDS}_iters${N_ITERS}"
+SWEEP_OUT_DIR="results/experiment_3_synthetic/stepcount_sweep_seeds${N_SEEDS}_iters${N_ITERS}_samples${N_SAMPLES}"
 
 python -m synthetic.aggregate_stepcount_sweep \
-  --seeds "${N_SEEDS}" --iters "${N_ITERS}" \
+  --seeds "${N_SEEDS}" --iters "${N_ITERS}" --n-samples "${N_SAMPLES}" \
   --step-counts "${STEP_COUNTS_CSV}" \
   --out-dir "${SWEEP_OUT_DIR}"
 

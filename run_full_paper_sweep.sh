@@ -57,7 +57,7 @@ echo "data-root: ${PDE_DATA_ROOT}, n-epochs: ${PDE_N_EPOCHS}, n-diff-steps: ${PD
 
 for PROBLEM in "${PROBLEMS[@]}"; do
   for ARCH in "${ARCHES[@]}"; do
-    OUT_DIR="results/experiment_2_physics/${PROBLEM}_${ARCH}"
+    OUT_DIR="results/experiment_2_physics/${PROBLEM}_${ARCH}_ep${PDE_N_EPOCHS}_bs${PDE_BATCH_SIZE[${ARCH}]}_lr${PDE_LR[${ARCH}]}_steps${PDE_N_DIFF_STEPS}_seeds${PDE_SEEDS//,/-}"
     mkdir -p "${OUT_DIR}"
     for METHOD in "${METHODS[@]}"; do
       RESULT_FILE="${OUT_DIR}/${METHOD}_results.json"
@@ -85,5 +85,5 @@ for PROBLEM in "${PROBLEMS[@]}"; do
 done
 
 echo "Done.                                                 "
-echo "Synthetic sweep: results/experiment_3_synthetic/stepcount_sweep_seeds${N_SEEDS}_iters${N_ITERS}/"
+echo "Synthetic sweep: results/experiment_3_synthetic/stepcount_sweep_seeds${N_SEEDS}_iters${N_ITERS}_samples${N_SAMPLES}/"
 echo "PDE grid: results/experiment_2_physics/{problem}_{arch}/{method}_results.json"

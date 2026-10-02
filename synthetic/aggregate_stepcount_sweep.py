@@ -6,11 +6,11 @@ import os
 
 from core.reporting import write_csv
 
-DEFAULT_DIR_TEMPLATE = "results/experiment_3_synthetic/final_seeds{seeds}_iters{iters}_steps{steps}"
+DEFAULT_DIR_TEMPLATE = "results/experiment_3_synthetic/final_seeds{seeds}_iters{iters}_samples{samples}_steps{steps}"
 
 
-def load_summary_rows(seeds: int, iters: int, steps: int, dir_template: str = DEFAULT_DIR_TEMPLATE) -> list[dict]:
-    path = f"{dir_template.format(seeds=seeds, iters=iters, steps=steps)}/analytic_n_sweep_summary.csv"
+def load_summary_rows(seeds: int, iters: int, samples: int, steps: int, dir_template: str = DEFAULT_DIR_TEMPLATE) -> list[dict]:
+    path = f"{dir_template.format(seeds=seeds, iters=iters, samples=samples, steps=steps)}/analytic_n_sweep_summary.csv"
     with open(path, newline="") as f:
         rows = list(csv.DictReader(f))
     for row in rows:
@@ -18,8 +18,8 @@ def load_summary_rows(seeds: int, iters: int, steps: int, dir_template: str = DE
     return rows
 
 
-def load_significance_rows(seeds: int, iters: int, steps: int, dir_template: str = DEFAULT_DIR_TEMPLATE) -> list[dict]:
-    path = f"{dir_template.format(seeds=seeds, iters=iters, steps=steps)}/analytic_n_sweep_significance.csv"
+def load_significance_rows(seeds: int, iters: int, samples: int, steps: int, dir_template: str = DEFAULT_DIR_TEMPLATE) -> list[dict]:
+    path = f"{dir_template.format(seeds=seeds, iters=iters, samples=samples, steps=steps)}/analytic_n_sweep_significance.csv"
     with open(path, newline="") as f:
         rows = list(csv.DictReader(f))
     for row in rows:
@@ -31,8 +31,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Combine per-step-count summary/significance CSVs into one step-count comparison table")
     p.add_argument("--seeds", type=int, required=True)
     p.add_argument("--iters", type=int, required=True)
+    p.add_argument("--n-samples", type=int, required=True, help="must match the --n-samples the source runs were actually produced with -- part of the directory identity")
     p.add_argument("--step-counts", required=True, help="comma-separated n_diff_steps values, e.g. 8,16,32,64,128")
-    p.add_argument("--dir-template", default=DEFAULT_DIR_TEMPLATE, help="per-step-count source dir, formatted with {seeds}/{iters}/{steps}")
+    p.add_argument("--dir-template", default=DEFAULT_DIR_TEMPLATE, help="per-step-count source dir, formatted with {seeds}/{iters}/{samples}/{steps}")
     p.add_argument("--out-dir", required=True)
     return p.parse_args(argv)
 
@@ -44,8 +45,8 @@ if __name__ == "__main__":
     all_summary_rows = []
     all_sig_rows = []
     for steps in step_counts:
-        all_summary_rows.extend(load_summary_rows(args.seeds, args.iters, steps, args.dir_template))
-        all_sig_rows.extend(load_significance_rows(args.seeds, args.iters, steps, args.dir_template))
+        all_summary_rows.extend(load_summary_rows(args.seeds, args.iters, args.n_samples, steps, args.dir_template))
+        all_sig_rows.extend(load_significance_rows(args.seeds, args.iters, args.n_samples, steps, args.dir_template))
 
     os.makedirs(args.out_dir, exist_ok=True)
     write_csv(all_summary_rows, os.path.join(args.out_dir, "stepcount_sweep_summary.csv"))
