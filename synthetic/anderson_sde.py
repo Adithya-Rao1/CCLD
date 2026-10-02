@@ -8,6 +8,7 @@ import torch
 from core.drift import _time_scale
 from core.sde import _primary_noise_and_sigma
 from synthetic.drift_coupled_gamma import drift_fn_coupled_gamma
+from synthetic.exact_dsm import exact_reverse_step_matrices
 from synthetic.skew_coupling import skew_drift_correction
 
 def anderson_em_step_coupled_gamma(
@@ -147,3 +148,75 @@ def anderson_reverse_step_coupled_gamma(
     if dX_skew is not None:
         X_new = [[xn - dx_s.float() * kin_scale * dt for xn, dx_s in zip(X_new[i], dX_skew[i])] for i in range(N)]
     return X_new, V_new
+
+
+def anderson_exact_reverse_step_coupled_gamma(
+    X: List[List[torch.Tensor]],
+    V: List[List[torch.Tensor]],
+    K_self: List[List[torch.Tensor]],
+    K_global: List[torch.Tensor],
+    score_outputs: List[List[torch.Tensor]],
+    t: int,
+    T: int,
+    alpha: List[float],
+    beta: List[float],
+    gamma_self: Optional[float],
+    gamma_couple: Optional[float],
+    coupling_matrix_drift: Optional[torch.Tensor],
+    k_reference: float,
+    dt: float,
+    G: torch.Tensor,
+    time_scale_fn: Optional[Callable[[torch.Tensor, int], torch.Tensor]] = None,
+    damping_matrix: Optional[torch.Tensor] = None,
+    skew_matrix: Optional[torch.Tensor] = None,
+    primary_index: int = 0,
+    score_scale: float = 1.0,
+):
+    N = len(X)
+    device, dtype = V[0][primary_index].device, V[0][primary_index].dtype
+
+    time_scale = _time_scale(torch.as_tensor(float(t)), T, time_scale_fn)
+    tau_hat_step = float(time_scale.clamp_min(0).item()) * dt
+
+    Phi_rev, Sigma_rev, Psi_rev = exact_reverse_step_matrices(
+        N, gamma_self, gamma_couple, alpha, beta, k_reference, coupling_matrix_drift,
+        tau_hat=tau_hat_step, constant_k=True, G0=G, damping_matrix=damping_matrix,
+        skew_matrix=skew_matrix, target_variance=1.0,
+    )
+    Phi_rev = Phi_rev.to(device=device, dtype=dtype)
+    Psi_rev = Psi_rev.to(device=device, dtype=dtype)
+
+    scale = Sigma_rev.diagonal().abs().max().clamp_min(1.0)
+    Sigma_reg = Sigma_rev + 1e-6 * scale * torch.eye(2 * N, dtype=Sigma_rev.dtype)
+    L_chol = torch.linalg.cholesky(Sigma_reg).to(device=device, dtype=dtype)
+
+    G_dt = G.to(device=device, dtype=dtype)
+    Sigma_diff = G_dt @ G_dt.T
+
+    primary_shape = V[0][primary_index].shape
+    eps = [torch.randn(primary_shape, device=device, dtype=dtype) for _ in range(2 * N)]
+
+    b_score = [
+        sum(Sigma_diff[i, j] * score_outputs[j][primary_index].float() for j in range(N)) * score_scale
+        for i in range(N)
+    ]
+
+    X_new: List[List[torch.Tensor]] = []
+    V_new: List[List[torch.Tensor]] = []
+    for i in range(N):
+        x_new_i = (
+            sum(Phi_rev[i, j] * X[j][primary_index].float() for j in range(N))
+            + sum(Phi_rev[i, N + j] * V[j][primary_index].float() for j in range(N))
+            + sum(Psi_rev[i, N + j] * b_score[j] for j in range(N))
+            + sum(L_chol[i, j] * eps[j] for j in range(2 * N))
+        )
+        v_new_i = (
+            sum(Phi_rev[N + i, j] * X[j][primary_index].float() for j in range(N))
+            + sum(Phi_rev[N + i, N + j] * V[j][primary_index].float() for j in range(N))
+            + sum(Psi_rev[N + i, N + j] * b_score[j] for j in range(N))
+            + sum(L_chol[N + i, j] * eps[j] for j in range(2 * N))
+        )
+        X_new.append([x_new_i])
+        V_new.append([v_new_i])
+    return X_new, V_new
+
