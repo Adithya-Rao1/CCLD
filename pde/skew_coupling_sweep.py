@@ -59,7 +59,7 @@ def _base_argv(args: argparse.Namespace) -> List[str]:
 
 
 def _condition_argv(label: str, args: argparse.Namespace, generic_scale: Optional[float]) -> List[str]:
-    base = _base_argv(args)
+    base = _base_argv(args) + ["--out-dir", os.path.join(args.out_dir, label)]
     if label == "symmetric_only":
         return base + ["--method", "ccld_pairwise", "--coupling-family", "mean_field", "--constant-k",
                         "--skew-coupling-family", "none"]
