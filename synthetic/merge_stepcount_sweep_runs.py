@@ -14,7 +14,9 @@ def _load_csv(path: str) -> List[dict]:
 
 
 def _dedup_key(row: dict) -> tuple:
-    return (row.get("N"), row.get("method"), row.get("n_diff_steps"))
+    if "method" in row:
+        return (row.get("N"), row.get("method"), row.get("n_diff_steps"))
+    return (row.get("N"), row.get("comparison"), row.get("metric"), row.get("n_diff_steps"))
 
 
 def _merge(csv_paths: List[str]) -> List[dict]:
