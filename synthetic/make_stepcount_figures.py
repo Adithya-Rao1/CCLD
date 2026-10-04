@@ -16,7 +16,7 @@ DEFAULT_SUMMARY_CSV = os.path.join(
 OUT_DIR = os.path.join(HERE, "figures")
 
 METHODS = ["ddpm", "sdm", "ccld_analytic", "ccld_independent"]
-METHOD_LABELS = {"ddpm": "DDPM", "sdm": "SDM", "ccld_analytic": "CCLD", "ccld_independent": "CCLD (uncoupled)"}
+METHOD_LABELS = {"ddpm": "DDPM", "sdm": "SGM", "ccld_analytic": "CCLD", "ccld_independent": "CLD"}
 METHOD_COLORS = {"ccld_analytic": "#2b7a78", "ddpm": "#c1440e", "sdm": "#5b5f97", "ccld_independent": "#8c8c8c"}
 METHOD_MARKERS = {"ccld_analytic": "o", "ddpm": "s", "sdm": "^", "ccld_independent": "d"}
 N_VALUES = [2, 3, 4, 5]
