@@ -16,7 +16,7 @@ echo "n_epochs=${N_EPOCHS}, seed=0, lr in {${LRS[*]}}     "
 
 for ARCH in "${ARCHES[@]}"; do
   for LR in "${LRS[@]}"; do
-    OUT_DIR="results/lr_sanity_check_v2/TE_heat_ccld_${ARCH}_lr${LR}"
+    OUT_DIR="results/lr_sanity_check_v2/TE_heat_ccld_${ARCH}_lr${LR}_ep${N_EPOCHS}"
     RESULT_FILE="${OUT_DIR}/ccld_results.json"
     if [ -f "${RESULT_FILE}" ]; then
       echo "${ARCH} lr=${LR}: already present at ${RESULT_FILE}, skipping"
@@ -42,7 +42,7 @@ import json, os, glob
 rows = []
 for arch in ['fno', 'unet_model']:
     for lr in ['0.0001', '0.0003', '0.001', '0.003']:
-        path = f'results/lr_sanity_check_v2/TE_heat_ccld_{arch}_lr{lr}/ccld_results.json'
+        path = f'results/lr_sanity_check_v2/TE_heat_ccld_{arch}_lr{lr}_ep${N_EPOCHS}/ccld_results.json'
         if not os.path.exists(path):
             rows.append((arch, lr, None))
             continue

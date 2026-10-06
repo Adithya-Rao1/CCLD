@@ -23,7 +23,7 @@ model:
 
 training:
   n_diff_steps: 20
-  dt: 0.05
+  dt: null                          # null -> defaults to 1/n_diff_steps
   batch_size: 256
   n_train_iters: 2000
   lr: 1.0e-3
