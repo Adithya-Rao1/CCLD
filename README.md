@@ -3,7 +3,7 @@
 ## Abstract
 In this work, we investigate capturing cross interactions in domains that require modeling coupled evolution. To this end, we introduce the coupled critically damped Langevin dynamics (CCLD) framework for facilitating information exchange while improving sampling efficiency and joint-distribution recovery. We demonstrate our framework's ability to significantly reduce KL divergence and correlation error on $N$-body coupled Ornstein–Uhlenbeck processes, and to reduce pointwise reconstruction error on coupled multiphysics PDE fields, while suggesting improved training stability over existing critically-damped Langevin approaches. Thus, our framework produces new insights into inducing cross interaction biases through the stochastic dynamics rather than refining model architectures. 
 
-Please refer to the paper for full mathematical details and experimental results: https://openreview.net/forum?id=tHVtoKVAYE
+Please refer to the paper for full mathematical details and experimental results: https://openreview.net/pdf?id=tHVtoKVAYE
 
 ## Setup
 
