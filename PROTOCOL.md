@@ -10,11 +10,14 @@ also carry. However, DDPM and SGM will still be trained at each strength and rep
 - **Ground-truth seed**: pinned at `gt_seed=0` for every strength to match initial experiments.
 - **Training seeds**: `0..9` (10 seeds) per (method, coupling_strength) cell. Gives paired-Wilcoxon its
 maximum attainable two-sided significance of `p=0.00195` at `n=10`.
+- **Numerical reference**: the closed-form analytic stationary Gaussian of the ground-truth coupled-OU process. Every error metric below will measure the distance to this target.
 - **Sampling budget parameters**: `n_diff_steps=32`, `n_train_iters=10000`, `n_samples=40000`
-- **Error metrics**: KL divergence to the true stationary Gaussian, Wasserstein-2, pairwise-correlation MAE
+- **Primary error metric**: KL divergence to the true stationary Gaussian. Moreover, Wasserstein-2 and pairwise-correlation MAE are also reported, but do not independently characterize the pass/fail criteria.
 - **Primary comparison and failure condition**: CCLD vs. CLD at `coupling_strength ∈ {0.3, 0.9}` — a
   fail occurs if CCLD's mean KL is not lower than CLD's mean KL, or the paired Wilcoxon test does not reach `p≤0.05` at `n=10` seeds. Conversely, since no coupling exists at `coupling_strength=0.0`, a fail there occurs if CCLD instead shows a statistically significant advantage over CLD since there is no real coupling signal for CCLD's extra coupling term to exploit. 
 - **Compute**: `3 held-out coupling strengths (0.0, 0.3, 0.9) x 10 seeds x 4 methods (CCLD, CLD, DDPM, SGM)` = 120 training runs. The completed antisymmetric-coupling sweep ran 1600 runs at a comparable per-run budget, so this is well under 1/10th that scale. Thus, this defines a small but useful extension to guide future experiments.
+- **Compute cap**: ~7 A100-hours. This figure is extrapolated from 800 runs taking ~15 hours on one A100 (i.e. ~1.1 min/run average). This protocol's 120 runs at that per-run rate extrapolate to ~2.25 hours. To account for any discrepancies, we apply a  ~3x safety margin to get ~7 hours.
+- **Duplication check**: Every coupled-OU result currently in `results/` was checked for its `coupling_strength` field and all of them are at `coupling_strength=0.6`. No existing result covers `coupling_strength ∈ {0.0, 0.3, 0.9}` on this system. Thus, this protocol does not duplicate completed work.
 
 ## Commands
 
