@@ -21,13 +21,15 @@ from core.diagnostics_bridge import attach_grad_hooks_generic, grad_norm_buckets
 from core.reporting import plot_bar_comparison, render_experiment_report, write_csv, write_json
 from core.sde import build_g_matrix_n
 from core.stats import aggregate_over_seeds
-from synthetic.anderson_sde import anderson_em_step_coupled_gamma, anderson_reverse_step_coupled_gamma
+from synthetic.anderson_sde import (
+    anderson_em_step_coupled_gamma, anderson_exact_reverse_step_coupled_gamma, anderson_reverse_step_coupled_gamma,
+)
 from synthetic.drift_coupled_gamma import (
     calibrate_coupled_gammas, calibrate_coupled_gammas_spectral, calibrate_sigma_fdt, calibrate_sigma_fdt_coupled,
     calibrate_sigma_fdt_spectral,
 )
 from synthetic.exact_dsm import (
-    _extract_Avx_Avv_coupled_gamma, closed_form_propagator_skew, elapsed_time_at_step,
+    _extract_Avx_Avv_coupled_gamma, closed_form_propagator, closed_form_propagator_skew, elapsed_time_at_step,
     precompute_transition_params, sample_and_analytic_score_target, sample_and_analytic_score_target_skew,
     sample_and_analytic_score_target_spectral,
 )
@@ -114,6 +116,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--beta", default="0.5")
     p.add_argument("--k-reference", type=float, default=1.0,)
     p.add_argument("--constant-k", action="store_true")
+    p.add_argument("--sampler", default="euler", choices=["euler", "exact"], help="exact uses the Van Loan matrix-exponential reverse integrator (no discretization error in the deterministic drift); requires --constant-k")
     p.add_argument("--n-diff-steps", type=int, default=32)
     p.add_argument("--dt", type=float, default=None)
     p.add_argument("--batch-size", type=int, default=8)
@@ -522,11 +525,23 @@ def train_one_seed(args: argparse.Namespace, seed: int) -> Dict[str, float]:
                                              args, device, task_names, is_spatial)
         state = build_method_state(args, N, device, coupling=coupling, sigma_ab=sigma_state)
         g_matrix = state["g_matrix"]
-        params = precompute_transition_params(
-            N, gamma_self, gamma_couple, args.alpha_list, args.beta_list, args.k_reference, coupling,
-            args.n_diff_steps, args.dt, lambda t, T: g_matrix, args.constant_k, _ccld_time_scale_fn(args),
-            damping_matrix=Gamma,
-        )
+        if args.sampler == "exact":
+            if not args.constant_k:
+                raise ValueError("--sampler exact requires --constant-k (exact_reverse_step_matrices has no time-varying-K support)")
+            params = [
+                closed_form_propagator(
+                    N, gamma_self, gamma_couple, args.alpha_list, args.beta_list, args.k_reference, coupling,
+                    tau_hat=elapsed_time_at_step(t_idx, args.n_diff_steps, args.dt, _ccld_time_scale_fn(args)),
+                    constant_k=True, G0=g_matrix, damping_matrix=Gamma,
+                )
+                for t_idx in range(1, args.n_diff_steps + 1)
+            ]
+        else:
+            params = precompute_transition_params(
+                N, gamma_self, gamma_couple, args.alpha_list, args.beta_list, args.k_reference, coupling,
+                args.n_diff_steps, args.dt, lambda t, T: g_matrix, args.constant_k, _ccld_time_scale_fn(args),
+                damping_matrix=Gamma,
+            )
         skew_matrix = skew_sigma_ref = params_skew = None
         if args.method == "ccld_pairwise":
             skew_matrix = _build_pde_skew(args, N, device, train_ds=train_ds, task_names=task_names)
@@ -710,12 +725,20 @@ def evaluate(args, model, score_net, val_loader, device, task_names, state, gamm
                     score_norms = [round(score_outputs[i][0].flatten(1).norm(dim=1).mean().item(), 4) for i in range(N)]
                     print(f"[debug-rollout] t_idx={t_idx:3d}  X_norm={dict(zip(task_names, x_norms))}  "
                           f"score_norm={dict(zip(task_names, score_norms))}")
-                X_cur, V_cur = anderson_reverse_step_coupled_gamma(
-                    X_cur, V_cur, K_self, K_global, score_outputs, t_idx, args.n_diff_steps,
-                    args.alpha_list, args.beta_list, gamma_self, gamma_couple,
-                    coupling, args.constant_k, args.dt, G, time_scale_fn=_ccld_time_scale_fn(args),
-                    damping_matrix=Gamma, skew_matrix=skew_matrix, skew_sigma_ref=skew_sigma_ref,
-                )
+                if args.sampler == "exact":
+                    X_cur, V_cur = anderson_exact_reverse_step_coupled_gamma(
+                        X_cur, V_cur, K_self, K_global, score_outputs, t_idx, args.n_diff_steps,
+                        args.alpha_list, args.beta_list, gamma_self, gamma_couple,
+                        coupling, args.k_reference, args.dt, G, time_scale_fn=_ccld_time_scale_fn(args),
+                        damping_matrix=Gamma, skew_matrix=skew_matrix,
+                    )
+                else:
+                    X_cur, V_cur = anderson_reverse_step_coupled_gamma(
+                        X_cur, V_cur, K_self, K_global, score_outputs, t_idx, args.n_diff_steps,
+                        args.alpha_list, args.beta_list, gamma_self, gamma_couple,
+                        coupling, args.constant_k, args.dt, G, time_scale_fn=_ccld_time_scale_fn(args),
+                        damping_matrix=Gamma, skew_matrix=skew_matrix, skew_sigma_ref=skew_sigma_ref,
+                    )
             final_latents = [X_cur[i][0] for i in range(N)]
         elif args.method == "ddpm":
             ac, betas_s, alphas_s = state["ddpm_sched"]
