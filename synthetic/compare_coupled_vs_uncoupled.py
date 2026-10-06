@@ -32,9 +32,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
     p.add_argument("--seeds", type=int, required=True)
     p.add_argument("--iters", type=int, required=True)
+    p.add_argument("--n-samples", type=int, required=True, help="must match the --n-samples the source runs were actually produced with -- part of the directory identity")
     p.add_argument("--step-counts", required=True, help="comma-separated n_diff_steps values, e.g. 8,16,32,64,128")
-    p.add_argument("--coupled-dir-template", default="results/experiment_3_synthetic/final_seeds{seeds}_iters{iters}_steps{steps}")
-    p.add_argument("--independent-dir-template", default="results/experiment_3_synthetic/final_seeds{seeds}_iters{iters}_steps{steps}_independent")
+    p.add_argument("--coupled-dir-template", default="results/experiment_3_synthetic/final_seeds{seeds}_iters{iters}_samples{samples}_steps{steps}")
+    p.add_argument("--independent-dir-template", default="results/experiment_3_synthetic/final_seeds{seeds}_iters{iters}_samples{samples}_steps{steps}_independent")
     p.add_argument("--coupled-method-label", default="ccld_analytic")
     p.add_argument("--independent-method-label", default="ccld_independent")
     p.add_argument("--out-dir", required=True)
@@ -47,8 +48,8 @@ if __name__ == "__main__":
 
     rows: List[dict] = []
     for steps in step_counts:
-        coupled_dir = args.coupled_dir_template.format(seeds=args.seeds, iters=args.iters, steps=steps)
-        independent_dir = args.independent_dir_template.format(seeds=args.seeds, iters=args.iters, steps=steps)
+        coupled_dir = args.coupled_dir_template.format(seeds=args.seeds, iters=args.iters, samples=args.n_samples, steps=steps)
+        independent_dir = args.independent_dir_template.format(seeds=args.seeds, iters=args.iters, samples=args.n_samples, steps=steps)
         coupled_by_n = _load_per_seed_by_n(
             os.path.join(coupled_dir, "analytic_n_sweep_per_seed.csv"), args.coupled_method_label
         )

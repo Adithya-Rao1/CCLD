@@ -11,7 +11,8 @@ import matplotlib.pyplot as plt
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_SUMMARY_CSV = os.path.join(
-    HERE, "..", "results", "experiment_3_synthetic", "stepcount_sweep_seeds10_iters10000", "stepcount_sweep_summary.csv"
+    HERE, "..", "results", "experiment_3_synthetic", "stepcount_sweep_seeds10_iters10000_samples40000",
+    "stepcount_sweep_summary.csv",
 )
 OUT_DIR = os.path.join(HERE, "figures")
 

@@ -1,7 +1,7 @@
 # Generalizing across coupling strengths.
 Every experiment in this repository sets the coupling strength to 0.6. Thus we propose running a sweep across different coupling strengths using a held-out split fixed before any run and comparing across CCLD, DDPM, and SGM. We believe this is the most logical successor protocol as significance within the results can help quantify the effectiveness of introducing coupling within dynamics.
 
-## Experiment ingo
+## Experiment info
 
 - **Ablation values**: `coupling_strength ∈ {0.0, 0.3, 0.9}`. `0.0` is a boundary condition where no coupling exists. Thus, CCLD should show no advantage here. Next, `0.3`/`0.9` bracket the established `0.6` point on both sides. We hypothesize a negative correlation between the coupling strength and KL divergence/cross asymmetrical MAE.
 - **Ground-truth seed**: pinned at `gt_seed=0` for every strength to match initial experiments.

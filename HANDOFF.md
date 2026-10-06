@@ -1,8 +1,10 @@
 # Handoff package
 
-Canonical pointer: `github.com/Adithya-Rao1/CCLD`, commit `52c4eee` (branch `main`). Everything
-below was verified against a clean `git clone` of that exact commit, not against the author's
-working copy, so it reflects what a new clone actually gives you.
+Canonical pointer: `github.com/Adithya-Rao1/CCLD`, commit `52c4eee` (branch `main`) for rows that
+predate the camera-revision merge. Rows 2, 3, 5, and 7 below reflect the current local branch
+`new/successor-prot-oct-6` (commit `725ecf8`, pushed to `origin/new/successor-prot-oct-6`, not yet
+merged to `main`) after merging in camera-revision's CLD baseline, Van Loan (exact) sampler, and
+the 10-seed TE\_heat sweep — this is not yet what a clone of `52c4eee` gives you.
 
 ## 1. Environment
 
@@ -34,30 +36,30 @@ python -m synthetic.run_experiment \
 Every row below cites where the number lives in this repository snapshot and the exact command to
 regenerate it.
 
-| # | Claim | Status | Retained artifact (this commit) | Reproduce |
+| # | Claim | Status | Retained artifact | Reproduce |
 |---|---|---|---|---|
-| 1 | CCLD's coupled drift is hypoelliptic / well-posed as an SDE across coupling modes, damping regimes, and N | Established, live-checked | `hypo_passed`/`hypo_min_eig` fields emitted by every `synthetic.run_experiment` run (see §2's smoke output) | §2's smoke command |
-| 2 | CCLD beats DDPM at low step counts (n≤32) across N=2..5, mean-field coupling, single coupling_strength=0.6; advantage not significant at n=64,128 (DDPM catches up) | Established, statistically significant (paired Wilcoxon, 10 seeds, p≤0.006 where claimed) | `README.md` §"Coupled Ornstein-Uhlenbeck processes" (full prose + numbers) and `writeup/figures/stepcount_sweep_grid.png` | `bash run_stepcount_sweep.sh 10 10000 40000` then `python -m synthetic.make_stepcount_figures` |
-| 3 | Against SDM/SGM, CCLD recovers pairwise correlation significantly closer to ground truth for n≥32; SGM over-estimates correlation 5-13% independent of step count; SGM has significantly *lower* raw KL than CCLD at n=8 | Established, same sweep as #2 | Same as #2 | Same as #2 |
-| 4 | Result in #2/#3 is scoped to coupling_strength=0.6, N≤5 — explicitly flagged as untested outside this regime | Established as a *limitation*, not (yet) generalized | `README.md`, same section | — (this is the gap `PROTOCOL_coupling_strength_generalization.md` targets) |
-| 5 | On real TE_heat (Multiphysics-Bench electro-thermal field), CCLD achieves lowest E-field PDE residual of {CCLD, DDPM, SDM}; DDPM more accurate pointwise on Im(Ez)/T; single seed, no significance test possible | Established as a point estimate only — explicitly not a settled comparison | `README.md` §"Coupled PDE field reconstruction" (table + prose) and `writeup/figures/te_heat_field_comparison.png` | Requires downloading Multiphysics-Bench first (`python -m pde.download_multiphysics_bench --out-dir pde/multiphysics-bench`, several GB); then the loop command in `README.md` §"Coupled PDE field reconstruction" |
-| 6 | Antisymmetric (skew) coupling injection (`synthetic/skew_coupling.py`, `core/coupling.py`) improves KL over symmetric-only coupling at matched Frobenius-norm magnitude, across N=2..5, both samplers, 5 step counts, 10 seeds | Established, independently re-verified against this snapshot's own data, and now reported in `README.md` §"Non-mean-field (antisymmetric) coupling" | Not present as a file in this snapshot (the raw sweep CSVs live only on the author's machine); numbers were pulled directly from that local data: 19/20 (N,n) cells favor `skew_structured` under the exact sampler, significant (p≤0.01, paired Wilcoxon, n=10 seeds) at N=2,3,4 for n=8; the one exception (N=5,n=16, p=0.002 in the other direction) is reported in `README.md`, not hidden | All code is present and `--help`-clean in this snapshot: `python -m synthetic.directional_recovery_sweep --seeds 0,1,2,3,4,5,6,7,8,9 --gt-seeds 0 --n-orig-sweep 2,3,4,5 --n-diff-steps-sweep 8,16,32,64,128 --samplers euler,exact --n-train-iters-sweep 10000 --n-samples 40000 --target-norm 0.625` (this is a real, multi-hour, GPU-scale sweep — not a smoke test) |
-| 7 | Everything else in `RESULTS.md`'s tables (vision/NYUDv2/PASCAL, most PDE ablation axes) | Not established — template only, values are `[TBD]`, never run against real data | n/a | n/a |
-
-**Row 6's one remaining caveat**: the raw evidence (per-seed CSVs) backing the now-published
-`README.md` numbers isn't part of this git snapshot, only on the author's machine — worth
-preserving deliberately (e.g. an explicit archive) rather than treating `README.md`'s prose as a
-substitute for the underlying data, in case anyone needs to re-derive or audit a number later.
+| 1 | CCLD's coupled drift is hypoelliptic and well-posed as an SDE across coupling modes, damping regimes, and N | Established | `hypo_passed`/`hypo_min_eig` fields emitted by every `synthetic.run_experiment` run (see #2's smoke output) | #2's smoke command |
+| 2 | CCLD and CLD both beat DDPM at low step counts (n≤32) across N=2..5, mean-field coupling, single coupling_strength=0.6, with p≤0.0137; advantage not significant at n=64,128 as DDPM catches up | Established, statistically significant (paired Wilcoxon, 10 seeds) | Paper | `bash run_stepcount_sweep.sh 10 10000 40000` --> Trains CCLD and the uncoupled-CLD baseline (method-label `ccld_independent`, `--beta 0`) both via the Van Loan exact sampler, alongside DDPM/SDM, and returns the combined summary/significance table at `results/experiment_3_synthetic/stepcount_sweep_seeds10_iters10000_samples40000/`; CCLD-vs-CLD significance lands separately at `results/experiment_3_synthetic/ccld_vs_cld_seeds10_iters10000_samples40000/coupled_vs_independent_significance.csv` |
+| 3 | Against SGM, CCLD recovers pairwise correlation significantly closer to ground truth for n≥32 (p<0.05); SGM under-estimates true correlation ~5-8% at n=8, then over-estimates it ~3-13% from n=16 onward; SGM has significantly lower KL than CCLD at n=8 (p≤0.004) | Established, same sweep as #2 | Paper | Same as #2 |
+| 4 | Result in #2/#3 is scoped to coupling_strength=0.6, N≤5| Established as a limitation | Paper | This is the limitation `PROTOCOL.md` targets |
+| 5 | On the real Multiphysics-Bench electro-thermal field, CCLD and CLD achieve the lowest pointwise rel.\ $\ell_2$ error on both E-field and T. However, DDPM/SGM achieve the lowest E-field PDE residual. Next, all four methods are statistically indistinguishable on heat PDE residual. Although, CLD beats CCLD significantly on T rel.\ $\ell_2$ alone (p=0.027, margin 0.00007) | Established, statistically significant (paired Wilcoxon, 10 seeds)| Paper | Requires downloading Multiphysics-Bench first (`python -m pde.download_multiphysics_bench --out-dir pde/multiphysics-bench`, several GB); `bash run_pde_baselines.sh` runs CCLD, the uncoupled-CLD baseline (`--method ccld_independent`), DDPM, and SDM for 10 seeds |
+| 6 | Antisymmetric (skew) coupling (`synthetic/skew_coupling.py`, `core/coupling.py`) improves KL over symmetric-only coupling at matched Frobenius-norm magnitude, across N=2..5, both samplers, 5 step counts, 10 seeds | Established, statistically significant (paired Wilcoxon, 10 seeds) | Significant (p≤0.01) at N=2,3,4 for n=8. The one exception (N=5,n=16, p=0.002 in the other direction) is reported in the paper | To reproduce, commands are `python -m synthetic.directional_recovery_sweep --seeds 0,1,2,3,4,5,6,7,8,9 --gt-seeds 0 --n-orig-sweep 2,3,4,5 --n-diff-steps-sweep 8,16,32,64,128 --samplers euler,exact --n-train-iters-sweep 10000 --n-samples 40000 --target-norm 0.625` |
+| 7 | On TE\_heat, CCLD shows a reduction in training gradient-norm explosion events vs. CLD (mean 0.7 vs 1.4 per run) that is marginally not significant (p=0.063). Upon further experimentation, we found that the closed-form DSM score-target precision is ~10% lower for CCLD than CLD at diffusion time q<0.01, shrinking to ~1% by q=2.0. We believe this is suggestive of improved training stability from the shared coupling term, but it is not yet an an established result | Established as suggestive since we don't achieve significance (p=0.063)| Paper | Same TE\_heat runs as row 5 where the explosion events are logged per-run |
 
 ## 4. Established vs. current limitations
 
 **Established** (statistically significant or explicitly-scoped point estimates, reproducible from
 this snapshot):
 - Core drift correctness: hypoellipticity holds across the tested coupling/damping/N grid (row 1).
-- Synthetic coupled-OU: CCLD's step-count efficiency advantage over DDPM, and its correlation
-  accuracy over SDM, both at a single coupling_strength=0.6 (rows 2-4).
+- Synthetic coupled-OU: CCLD's and CLD's step-count efficiency advantage over DDPM, and CCLD's
+  correlation accuracy over SGM, both at a single coupling_strength=0.6 (rows 2-4).
+- PDE TE_heat: CCLD/CLD beat DDPM/SGM on pointwise rel. $\ell_2$ error; DDPM/SGM
+  beat CCLD/CLD on E-field PDE-residual self-consistency; CLD beats CCLD on T rel. $\ell_2$ alone,
+  by a tiny but significant margin (row 5).
 - Antisymmetric/skew coupling improves on symmetric-only coupling at matched magnitude, broadly
   across N and step count under the exact sampler (row 6).
 
 **Current limitations**:
 - Every synthetic-OU result is at exactly one coupling_strength (0.6).
+- CCLD predicts the entire score rather than a residual relative to CLD's closed form.
+- CCLD's training-stability benefits over CLD on TE_heat from fewer gradient norm explosions does not clear significance (p=0.063)

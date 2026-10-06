@@ -47,7 +47,7 @@ else
   echo "shared encoders: already present for all seeds in ${ENCODER_DIR}, skipping"
 fi
 
-for METHOD in ccld ddpm sdm; do
+for METHOD in ccld ccld_independent ddpm sdm; do
   RESULT_FILE="${OUT_DIR}/${METHOD}_results.json"
   if [ -f "${RESULT_FILE}" ]; then
     echo "${METHOD}: already present at ${RESULT_FILE}, skipping"
@@ -72,4 +72,4 @@ for METHOD in ccld ddpm sdm; do
     || echo "FAILED: ${PROBLEM}/${ARCH}/${METHOD}"
 done
 
-echo "Done. Results in ${OUT_DIR}/{ccld,ddpm,sdm}_results.json"
+echo "Done. Results in ${OUT_DIR}/{ccld,ccld_independent,ddpm,sdm}_results.json"
