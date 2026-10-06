@@ -9,11 +9,11 @@ Every experiment in this repository sets the coupling strength to 0.6. Thus we p
 maximum attainable two-sided significance of `p=0.00195` at `n=10`.
 - **Sampling budget parameters**: `n_diff_steps=32, `n_train_iters=10000`, `n_samples=40000`
 - **Error metrics**: KL divergence to the true stationary Gaussian, Wasserstein-2, pairwise-correlation MAE
-- **Failure condition**: if CCLD's mean KL is lower than DDPM's mean KL (correct sign) AND the paired
-  Wilcoxon test reaches `p≤0.05` at `n=10` seeds. However, since no coupling exists at`coupling_strength=0.0`, a fail would occur if CCLD shows a significant advantage over DDPM at this strength.
-- **Compute**: `2 extra coupling strengths × 10 seeds × 4 methods (0.0, CCLD, DDPM, SGM)` = 80 training
-runs. For reference, the completed antisymmetric-coupling sweep ran 1600 runs at a comparable
-per-run budget. Thus, this is 1/20th that scale, and hence a small, but meaningful extension.
+- **Failure condition**: at `coupling_strength ∈ {0.3, 0.9}`, a fail occurs if CCLD's mean KL is not
+  lower than DDPM's mean KL ot the paired Wilcoxon test does not reach `p≤0.05` at
+  `n=10` seeds. Conversely, since no coupling exists at `coupling_strength=0.0`, a fail there occurs if CCLD instead shows a statistically significant advantage over DDPM.
+- **Compute**: `3 held-out coupling strengths (0.0, 0.3, 0.9) × 10 seeds × 3 methods (CCLD, DDPM, SGM)` = 90 training runs. The completed antisymmetric-coupling sweep ran 1600 runs at a comparable
+per-run budget. Thus, this is well under 1/15th that scale, and hence a small, but useful extension to guide future experiments.
 
 ## Commands
 ```
