@@ -61,5 +61,3 @@ this snapshot):
 
 **Current limitations**:
 - Every synthetic-OU result is at exactly one coupling_strength (0.6).
-- The PDE result (row 5) is a single seed with no baseline comparison across coupling structures.
-- An CLD baseline does not exist yet for the synthetic-OU result.
