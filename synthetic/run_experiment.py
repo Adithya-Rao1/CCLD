@@ -179,7 +179,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--time-scale-schedule", default="original", choices=["original", "vp_linear"],)
 
     p.add_argument("--n-diff-steps", type=int, default=20)
-    p.add_argument("--dt", type=float, default=0.05)
+    p.add_argument("--dt", type=float, default=None, help="defaults to 1/n_diff_steps if not set")
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--n-train-iters", type=int, default=2000)
     p.add_argument("--lr", type=float, default=1e-3)
@@ -227,6 +227,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     args.seeds = [int(s) for s in str(args.seeds).split(",") if s.strip() != ""]
     args.alpha = parse_float_list(args.alpha, args.N)
     args.beta = parse_float_list(args.beta, args.N)
+    if args.dt is None:
+        args.dt = 1.0 / args.n_diff_steps
     if args.mixing_t_fixed is None:
         args.mixing_t_fixed = args.n_diff_steps / 2.0
     return args
